@@ -35,6 +35,14 @@ async function tg(env, method, payload) {
 }
 const H = (s) => String(s ?? '').replace(/[<&>]/g, (c) => ({ '<': '&lt;', '&': '&amp;', '>': '&gt;' }[c]));
 
+// الملّاك: OWNER_ID يقبل أكثر من رقم مفصولة بفاصلة (تحكّم مشترك)
+const ownerIds = (env) => String(env.OWNER_ID || '').split(',').map(s => s.trim()).filter(Boolean);
+async function notifyOwners(env, text, extra = {}) {
+  for (const id of ownerIds(env)) {
+    await tg(env, 'sendMessage', { chat_id: id, parse_mode: 'HTML', text, ...extra });
+  }
+}
+
 // ---------- تشغيل عامل GitHub ----------
 async function dispatchWorker(env, app, footer) {
   const res = await fetch(`https://api.github.com/repos/${env.GH_REPO}/dispatches`, {
@@ -548,10 +556,7 @@ async function maybeDailySummary(env) {
     subsLine = `\n\n👥 مشتركوك: ${subs}${arrow}`;
     await setSetting(env, 'subs_last', subs);
   }
-  await tg(env, 'sendMessage', {
-    chat_id: env.OWNER_ID, parse_mode: 'HTML',
-    text: `<b>📊 ملخص اليوم (${today})</b>\n\nنُشر إجمالاً: ${total}${subsLine}\n\n${lines.join('\n')}\n\n⚠️ أخطاء: ${errs}`,
-  });
+  await notifyOwners(env, `<b>📊 ملخص اليوم (${today})</b>\n\nنُشر إجمالاً: ${total}${subsLine}\n\n${lines.join('\n')}\n\n⚠️ أخطاء: ${errs}`);
 }
 
 // عدد مشتركي القناة (البوت لازم يكون مشرفاً فيها) — يرجّع null إذا تعذّر (يتخطّى بهدوء)
@@ -588,8 +593,7 @@ async function maybeSubsWatch(env) {
   const prev = prevEntry ? prevEntry.c : 0;
   // 📉 تنبيه هبوط (نقص 10+ مشترك بيوم)
   if (prev && (prev - count) >= 10) {
-    await tg(env, 'sendMessage', { chat_id: env.OWNER_ID, parse_mode: 'HTML',
-      text: `📉 <b>تنبيه هبوط</b>\n\nنقص ${prev - count} مشترك اليوم (من ${prev} إلى ${count}).\nراجع آخر منشوراتك — قد يكون فيها ما أزعج المتابعين.` });
+    await notifyOwners(env, `📉 <b>تنبيه هبوط</b>\n\nنقص ${prev - count} مشترك اليوم (من ${prev} إلى ${count}).\nراجع آخر منشوراتك — قد يكون فيها ما أزعج المتابعين.`);
   }
   // 🎉 تنبيه المعالم (كل 500)
   const step = 500;
@@ -599,8 +603,7 @@ async function maybeSubsWatch(env) {
     await setSetting(env, 'subs_milestone', crossed);                   // خط أساس (بلا احتفال رجعي)
   } else if (crossed > lastM) {
     await setSetting(env, 'subs_milestone', crossed);
-    await tg(env, 'sendMessage', { chat_id: env.OWNER_ID, parse_mode: 'HTML',
-      text: `🎉 <b>مبروك!</b>\n\nقناتك وصلت <b>${crossed}</b> مشترك 🚀\nاستمر — نموّك ممتاز!` });
+    await notifyOwners(env, `🎉 <b>مبروك!</b>\n\nقناتك وصلت <b>${crossed}</b> مشترك 🚀\nاستمر — نموّك ممتاز!`);
   }
 }
 
@@ -617,10 +620,7 @@ async function maybeHealthCheck(env) {
   if (since < 6 * 3600) return;                                             // نُشر مؤخراً = تمام
   if (await getSetting(env, 'health_alerted', '0') === '1') return;         // نبّهنا مسبقاً
   await setSetting(env, 'health_alerted', '1');
-  await tg(env, 'sendMessage', {
-    chat_id: env.OWNER_ID, parse_mode: 'HTML',
-    text: `🔴 <b>تنبيه: النشر متوقف</b>\n\nصار ${fmtDur(since)} وما نُشر ولا تطبيق، والطابور فيه ${pending} منتظر.\n\nالأسباب المحتملة:\n• اشتراكك بموقع أحمد انتهى\n• مشكلة بجيت هَب أو تلقرام\n\nافتح «🧠 لوحتي» ← 📊 التقرير لتشوف آخر خطأ.`,
-  });
+  await notifyOwners(env, `🔴 <b>تنبيه: النشر متوقف</b>\n\nصار ${fmtDur(since)} وما نُشر ولا تطبيق، والطابور فيه ${pending} منتظر.\n\nالأسباب المحتملة:\n• اشتراكك بموقع أحمد انتهى\n• مشكلة بجيت هَب أو تلقرام\n\nافتح «🧠 لوحتي» ← 📊 التقرير لتشوف آخر خطأ.`);
 }
 
 // تقرير أسبوعي (كل جمعة بعد 9 مساءً السعودية، مرة واحدة)
@@ -650,10 +650,7 @@ async function maybeWeeklySummary(env) {
     subsLine = `\n\n👥 المشتركون: ${subs}${arrow}`;
     await setSetting(env, 'subs_week_ago', subs);
   }
-  await tg(env, 'sendMessage', {
-    chat_id: env.OWNER_ID, parse_mode: 'HTML',
-    text: `<b>🗓️ تقرير الأسبوع</b>\n\nنُشر إجمالاً: ${total}\nأنشط قسم: ${topName}${subsLine}\n\n${lines.join('\n')}\n\n⚠️ أخطاء الأسبوع: ${errs}`,
-  });
+  await notifyOwners(env, `<b>🗓️ تقرير الأسبوع</b>\n\nنُشر إجمالاً: ${total}\nأنشط قسم: ${topName}${subsLine}\n\n${lines.join('\n')}\n\n⚠️ أخطاء الأسبوع: ${errs}`);
 }
 
 // ---------- المُوجّه ----------
@@ -672,7 +669,7 @@ export default {
       const u = await readJson();
       if (!u) return new Response('ok');
       const from = u.callback_query ? u.callback_query.from : (u.message ? u.message.from : null);
-      if (!from || String(from.id) !== String(env.OWNER_ID)) return new Response('ok'); // للمالك فقط
+      if (!from || !ownerIds(env).includes(String(from.id))) return new Response('ok'); // للملّاك فقط
       if (u.callback_query) await handleCallback(env, u.callback_query);
       else if (u.message) await handleMessage(env, u.message);
       return new Response('ok');
@@ -751,9 +748,7 @@ export default {
         else if (/403|forbidden|401|unauthorized/i.test(errMsg)) why = 'رُفض الوصول (صلاحية أو جلسة منتهية)';
         else if (/space|disk|memory/i.test(errMsg)) why = 'نفدت المساحة أثناء المعالجة';
         else if (/chat not found|bot was blocked|CHANNEL_INVALID/i.test(errMsg)) why = 'مشكلة بالوصول للقناة (تحقق من صلاحية البوت)';
-        await tg(env, 'sendMessage', {
-          chat_id: env.OWNER_ID, parse_mode: 'HTML',
-          text: `⚠️ <b>تُخطّي: ${H(nm)}</b>\nالسبب: ${H(why)}`,
+        await notifyOwners(env, `⚠️ <b>تُخطّي: ${H(nm)}</b>\nالسبب: ${H(why)}`, {
           reply_markup: { inline_keyboard: [[{ text: `⛔ احظره نهائياً`, callback_data: `blk_${body.app_id}` }]] },
         });
       }
