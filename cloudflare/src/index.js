@@ -26,6 +26,26 @@ async function logEvent(env, kind, msg) {
   await env.DB.prepare('INSERT INTO log(ts,kind,msg) VALUES(?,?,?)').bind(nowSec(), kind, msg).run();
 }
 
+// ترجمة أي خطأ تقني لسبب عربي واضح (يُستخدم بالتنبيه والسجل معاً — لا إنقلش للمالك أبداً)
+function arErr(msg) {
+  const m = String(msg || '');
+  if (/OVERSIZE|file parts is invalid|entity too large|too big/i.test(m)) return 'التطبيق أكبر من حد تلقرام (٢ جيجا) — لا يمكن رفعه';
+  if (/DEAD_APP|0-byte/i.test(m)) return 'ملف تالف على الخادم (فارغ)';
+  if (/wait of \d+ seconds/i.test(m)) return 'تلقرام حدّ الرفع مؤقتاً (سيُعاد لاحقاً)';
+  if (/two different IP|authorization key/i.test(m)) return 'الجلسة استُخدمت من مكانين معاً (سيُعاد لاحقاً)';
+  if (/not an IPA/i.test(m)) return 'الملف المحمّل ليس تطبيقاً سليماً';
+  if (/truncated/i.test(m)) return 'التحميل انقطع قبل اكتماله';
+  if (/login failed/i.test(m)) return 'تعذّر تسجيل الدخول لموقع أحمد';
+  if (/not found in recent/i.test(m)) return 'التطبيق ما عاد موجوداً بقائمة أحمد';
+  if (/inject|lief|dylib/i.test(m)) return 'تعذّر حقن الإضافة بالتطبيق';
+  if (/timed? ?out|timeout/i.test(m)) return 'انتهت المهلة (الملف كبير أو الشبكة بطيئة)';
+  if (/connection|network|resolve|ECONN|SSL|certificate/i.test(m)) return 'انقطاع بالاتصال أثناء التحميل';
+  if (/403|forbidden|401|unauthorized/i.test(m)) return 'رُفض الوصول (صلاحية أو جلسة منتهية)';
+  if (/space|disk|memory/i.test(m)) return 'نفدت المساحة أثناء المعالجة';
+  if (/chat not found|bot was blocked|CHANNEL_INVALID/i.test(m)) return 'مشكلة بالوصول للقناة (تحقق من صلاحية البوت)';
+  return 'خطأ غير متوقع أثناء المعالجة';
+}
+
 // ---------- تلقرام ----------
 async function tg(env, method, payload) {
   const r = await fetch(`https://api.telegram.org/bot${env.TG_BOT_TOKEN}/${method}`, {
@@ -108,14 +128,21 @@ async function enqueueApps(env, section, apps) {
     const pub = await env.DB.prepare('SELECT 1 FROM published WHERE app_id=? AND version=?')
       .bind(a.id, ver).first();
     if (pub) continue;
-    // موجود بالطابور؟ حدّث بيانات pending فقط دون تغيير ترتيبه أو قسمه
-    const ex = await env.DB.prepare('SELECT status FROM queue WHERE app_id=?').bind(a.id).first();
+    // موجود بالطابور؟
+    const ex = await env.DB.prepare('SELECT status, version FROM queue WHERE app_id=?').bind(a.id).first();
     if (ex) {
       if (ex.status === 'pending') {
+        // حدّث بيانات pending فقط دون تغيير ترتيبه أو قسمه
         await env.DB.prepare('UPDATE queue SET version=?, download_url=?, name=? WHERE app_id=? AND status=?')
           .bind(ver, a.download_url, a.name || '', a.id, 'pending').run();
+        continue;
       }
-      continue;
+      // فشل سابقاً لكن نزل إصدار جديد → امنحه فرصة جديدة (احذف صف الفشل واتركه يُدرج من جديد)
+      if (ex.status === 'failed' && ex.version !== ver) {
+        await env.DB.prepare('DELETE FROM queue WHERE app_id=?').bind(a.id).run();
+      } else {
+        continue;  // قيد المعالجة، أو نفس النسخة الفاشلة → تجاهل
+      }
     }
     await env.DB.prepare('INSERT INTO queue(app_id,name,version,download_url,rank,added_at,status,section) VALUES(?,?,?,?,?,?,?,?)')
       .bind(a.id, a.name || '', ver, a.download_url, a.rank ?? 9999, nowSec(), 'pending', section).run();
@@ -665,7 +692,11 @@ async function maybeHealthCheck(env) {
   if (await getSetting(env, 'enabled', '1') !== '1') return;                 // متوقف يدوياً = طبيعي
   const pausedUntil = parseInt(await getSetting(env, 'paused_until', '0'), 10) || 0;
   if (pausedUntil && nowSec() < pausedUntil) return;                        // موقوف مؤقتاً = طبيعي
-  const pending = (await env.DB.prepare("SELECT COUNT(*) c FROM queue WHERE status='pending'").first()).c;
+  // احسب المنتظرين في الأقسام المفعّلة فقط (قسم موقّف به منتظرون = وضع مقصود، لا إنذار)
+  const enabledKeys = (await loadSections(env, true)).map(s => s.key);
+  if (!enabledKeys.length) return;
+  const ph = enabledKeys.map(() => '?').join(',');
+  const pending = (await env.DB.prepare(`SELECT COUNT(*) c FROM queue WHERE status='pending' AND section IN (${ph})`).bind(...enabledKeys).first()).c;
   if (!pending) return;                                                     // ما فيه شي ينتظر = طبيعي
   const last = parseInt(await getSetting(env, 'last_publish_ts', '0'), 10) || 0;
   if (!last) return;                                                        // لم ينشر بعد أصلاً = لا إنذار كاذب
@@ -782,27 +813,12 @@ export default {
       const giveUp = isDead || isOversize || attempts >= 3;  // تالف/كبير = فوراً، وإلا بعد 3 محاولات
       await env.DB.prepare(`UPDATE queue SET status=?, attempts=? WHERE app_id=?`)
         .bind(giveUp ? 'failed' : 'pending', attempts, body.app_id).run();
-      await logEvent(env, 'error', `${isDead ? '☠️ تالف' : isOversize ? '📦 كبير' : 'فشل'} ${body.app_id}${(isDead || isOversize) ? '' : ` (محاولة ${attempts})`}: ${errMsg.slice(0, 140)}`);
+      const reason = arErr(errMsg);   // سبب عربي موحّد (للسجل والتنبيه معاً)
+      await logEvent(env, 'error', `${isDead ? '☠️ تالف' : isOversize ? '📦 كبير' : 'فشل'} ${body.app_id}${(isDead || isOversize) ? '' : ` (محاولة ${attempts})`}: ${reason}`);
       if ((attempts >= 3 || isOversize) && !isDead) {
-        // اسم التطبيق + سبب الفشل الواضح
         const q = await env.DB.prepare('SELECT name FROM queue WHERE app_id=?').bind(body.app_id).first();
         const nm = q && q.name ? q.name : body.app_id;
-        // السبب دائماً بالعربي (لا يظهر خطأ إنجليزي خام للمالك أبداً)
-        let why = 'خطأ غير متوقع أثناء المعالجة';
-        if (isOversize) why = 'التطبيق أكبر من حد تلقرام (٢ جيجا) — لا يمكن رفعه';
-        else if (/wait of \d+ seconds/i.test(errMsg)) why = 'تلقرام حدّ الرفع مؤقتاً (سيُعاد لاحقاً)';
-        else if (/two different IP|authorization key/i.test(errMsg)) why = 'الجلسة استُخدمت من مكانين معاً (سيُعاد لاحقاً)';
-        else if (/not an IPA/i.test(errMsg)) why = 'الملف المحمّل ليس تطبيقاً سليماً';
-        else if (/truncated/i.test(errMsg)) why = 'التحميل انقطع قبل اكتماله';
-        else if (/login failed/i.test(errMsg)) why = 'تعذّر تسجيل الدخول لموقع أحمد';
-        else if (/not found in recent/i.test(errMsg)) why = 'التطبيق ما عاد موجوداً بقائمة أحمد';
-        else if (/inject|lief|dylib/i.test(errMsg)) why = 'تعذّر حقن الإضافة بالتطبيق';
-        else if (/timed? ?out|timeout/i.test(errMsg)) why = 'انتهت المهلة (الملف كبير أو الشبكة بطيئة)';
-        else if (/connection|network|resolve|ECONN|SSL|certificate/i.test(errMsg)) why = 'انقطاع بالاتصال أثناء التحميل';
-        else if (/403|forbidden|401|unauthorized/i.test(errMsg)) why = 'رُفض الوصول (صلاحية أو جلسة منتهية)';
-        else if (/space|disk|memory/i.test(errMsg)) why = 'نفدت المساحة أثناء المعالجة';
-        else if (/chat not found|bot was blocked|CHANNEL_INVALID/i.test(errMsg)) why = 'مشكلة بالوصول للقناة (تحقق من صلاحية البوت)';
-        await notifyOwners(env, `⚠️ <b>تُخطّي: ${H(nm)}</b>\nالسبب: ${H(why)}`, {
+        await notifyOwners(env, `⚠️ <b>تُخطّي: ${H(nm)}</b>\nالسبب: ${H(reason)}`, {
           reply_markup: { inline_keyboard: [[{ text: `⛔ احظره نهائياً`, callback_data: `blk_${body.app_id}` }]] },
         });
       }
