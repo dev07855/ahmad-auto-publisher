@@ -35,10 +35,17 @@ async function tg(env, method, payload) {
 }
 const H = (s) => String(s ?? '').replace(/[<&>]/g, (c) => ({ '<': '&lt;', '&': '&amp;', '>': '&gt;' }[c]));
 
-// الملّاك: OWNER_ID يقبل أكثر من رقم مفصولة بفاصلة (تحكّم مشترك)
-const ownerIds = (env) => String(env.OWNER_ID || '').split(',').map(s => s.trim()).filter(Boolean);
+// الملّاك مخزّنون بجدول settings (تُعدَّل من البوت نفسه)؛ عند الفراغ نبدأ من سر OWNER_ID
+async function getOwners(env) {
+  const stored = await getSetting(env, 'owners', '');
+  const ids = (stored || String(env.OWNER_ID || '')).split(',').map(s => s.trim()).filter(Boolean);
+  return [...new Set(ids)];
+}
+async function setOwners(env, ids) {
+  await setSetting(env, 'owners', [...new Set(ids.map(String))].filter(Boolean).join(','));
+}
 async function notifyOwners(env, text, extra = {}) {
-  for (const id of ownerIds(env)) {
+  for (const id of await getOwners(env)) {
     await tg(env, 'sendMessage', { chat_id: id, parse_mode: 'HTML', text, ...extra });
   }
 }
@@ -244,6 +251,7 @@ async function panelMain(env) {
     [{ text: '👥 المشتركون', callback_data: 'subs' }, { text: '📊 التقرير', callback_data: 'report' }],
     [{ text: '🕐 إيقاف مؤقت', callback_data: 'pause' }],
     [{ text: '🚫 القائمة السوداء', callback_data: 'black' }, { text: '✍️ الفوتر', callback_data: 'footer' }],
+    [{ text: '👤 الملّاك', callback_data: 'owners' }],
     [{ text: '🔄 تحديث', callback_data: 'home' }],
   ];
   return { text, kb };
@@ -460,6 +468,41 @@ async function handleCallback(env, cq) {
     return edit(h ? `⏸️ تم الإيقاف المؤقت ${fmtDur(h * 3600)}. (شوف الحالة فوق)` : '▶️ أُلغي الإيقاف — النشر يعمل الآن.', p.kb);
   }
 
+  // 👤 إدارة الملّاك — عرض القائمة، كل مالك جنبه زر حذف (يُمنع حذف الأخير)
+  if (data === 'owners') {
+    const owners = await getOwners(env);
+    const me = String(cq.from.id);
+    const rows = owners.map(id => (owners.length > 1
+      ? [{ text: `🗑️ ${id}${id === me ? ' (أنت)' : ''}`, callback_data: `delowner_${id}` }]
+      : [{ text: `${id}${id === me ? ' (أنت)' : ''}`, callback_data: 'owners' }]));
+    rows.push([{ text: '➕ أضف مالك', callback_data: 'addowner' }]);
+    rows.push(...back);
+    return edit('<b>👤 ملّاك البوت</b>\nكل رقم يتحكّم بالبوت كامل.\nاضغط 🗑️ لإزالة مالك (ما يمكن إزالة الأخير):', rows);
+  }
+  const dow = data.match(/^delowner_(\d+)$/);
+  if (dow) {
+    const id = dow[1];
+    let owners = await getOwners(env);
+    if (owners.length <= 1) return edit('⚠️ لا يمكن إزالة المالك الوحيد.', [[{ text: '⬅️ رجوع', callback_data: 'owners' }]]);
+    owners = owners.filter(x => x !== id);
+    await setOwners(env, owners);
+    if (id === String(cq.from.id)) {
+      // أزال نفسه — يطلع من البوت (بلا لوحة)
+      return edit('✅ طلعت من البوت — ما عاد لك تحكّم.\n\nإذا حبيت ترجع، صاحب البوت يقدر يضيفك.', []);
+    }
+    const me = String(cq.from.id);
+    const rows = owners.map(x => (owners.length > 1
+      ? [{ text: `🗑️ ${x}${x === me ? ' (أنت)' : ''}`, callback_data: `delowner_${x}` }]
+      : [{ text: `${x}${x === me ? ' (أنت)' : ''}`, callback_data: 'owners' }]));
+    rows.push([{ text: '➕ أضف مالك', callback_data: 'addowner' }]);
+    rows.push(...back);
+    return edit(`✅ أُزيل المالك ${H(id)}.\n\n<b>👤 ملّاك البوت</b>`, rows);
+  }
+  if (data === 'addowner') {
+    await setSetting(env, 'await', 'addowner');
+    return edit('➕ أرسل الآن رقم تلقرام الرقمي للمالك الجديد.\n(يجيبه من بوت @userinfobot):', [[{ text: '⬅️ رجوع', callback_data: 'owners' }]]);
+  }
+
   if (data === 'black') {
     const rows = (await env.DB.prepare('SELECT name,app_id FROM blacklist LIMIT 20').all()).results;
     const body = rows.length ? rows.map(r => `• ${H(r.name || r.app_id)}`).join('\n') : 'فاضية';
@@ -500,6 +543,16 @@ async function handleMessage(env, msg) {
     if (!/^\d+$/.test(text) || !(await sectionExists(env, key))) return reply('❌ أرسل رقماً صحيحاً.');
     await env.DB.prepare('UPDATE sections SET quota=? WHERE key=?').bind(safeCount(text, 5), key).run();
     return reply(`✅ عدد ${await sectionName(env, key)} = ${safeCount(text, 5)}/ساعة.`);
+  }
+  // إضافة مالك جديد: الرسالة التالية بعد «➕ أضف مالك» = رقمه
+  if (awaiting === 'addowner') {
+    await setSetting(env, 'await', '');
+    if (!/^\d{5,}$/.test(text)) return reply('❌ أرسل رقماً صحيحاً (أرقام فقط، من @userinfobot).');
+    const owners = await getOwners(env);
+    if (owners.includes(text)) return reply('ℹ️ هذا الرقم مالك بالفعل.');
+    owners.push(text);
+    await setOwners(env, owners);
+    return reply(`✅ أُضيف المالك ${text}. صار يقدر يفتح البوت ويتحكم.`);
   }
   if (text.startsWith('فوتر:')) {
     await setSetting(env, 'footer', text.slice(5).trim());
@@ -669,7 +722,8 @@ export default {
       const u = await readJson();
       if (!u) return new Response('ok');
       const from = u.callback_query ? u.callback_query.from : (u.message ? u.message.from : null);
-      if (!from || !ownerIds(env).includes(String(from.id))) return new Response('ok'); // للملّاك فقط
+      const owners = await getOwners(env);
+      if (!from || !owners.includes(String(from.id))) return new Response('ok'); // للملّاك فقط
       if (u.callback_query) await handleCallback(env, u.callback_query);
       else if (u.message) await handleMessage(env, u.message);
       return new Response('ok');
