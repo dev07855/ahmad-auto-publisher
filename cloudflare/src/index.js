@@ -189,6 +189,8 @@ async function markPublished(env, app_id, name, version) {
   await env.DB.prepare('INSERT OR IGNORE INTO published(app_id,version,section,published_day,published_at) VALUES(?,?,?,?,?)')
     .bind(app_id, version || '', section, today, nowSec()).run();
   await env.DB.prepare('DELETE FROM queue WHERE app_id=?').bind(app_id).run();
+  await setSetting(env, 'last_publish_ts', nowSec());  // نبض النظام: آخر نشر ناجح
+  await setSetting(env, 'health_alerted', '0');         // صفّر تنبيه التوقف (النظام حيّ)
   await logEvent(env, 'ok', `نُشر [${section}]: ${name || app_id}`);
 }
 
@@ -227,6 +229,7 @@ async function panelMain(env) {
     `\n\nنُشر اليوم: ${todayCount}`;
   const kb = [
     [{ text: enabled ? '⏸️ إيقاف' : '▶️ تشغيل', callback_data: 'toggle' }],
+    [{ text: '🚀 نشر تطبيق فوراً', callback_data: 'pubnow' }],
     [{ text: '🔢 الأقسام والأعداد', callback_data: 'secs' }, { text: '📋 الطابور', callback_data: 'queue' }],
     [{ text: mix ? '🗂️ اجعله مجمّع' : '🔀 اجعله مخلوط', callback_data: 'mix' },
      { text: daily ? '🔕 إيقاف الملخص اليومي' : '🔔 تفعيل الملخص اليومي', callback_data: 'daily' }],
@@ -249,6 +252,42 @@ async function handleCallback(env, cq) {
   const back = [[{ text: '⬅️ رجوع', callback_data: 'home' }]];
 
   if (data === 'home') { const p = await panelMain(env); return edit(p.text, p.kb); }
+
+  // نشر فوري: اعرض تطبيقات الطابور بالاسم (أزرار) — اضغط واحداً ليُنشر الآن متخطياً الدور
+  if (data === 'pubnow') {
+    const rows = (await env.DB.prepare("SELECT app_id,name,version FROM queue WHERE status='pending' ORDER BY added_at DESC LIMIT 15").all()).results;
+    if (!rows.length) return edit('<b>🚀 نشر فوري</b>\n\nالطابور فاضي حالياً — انتظر المسح القادم ثم جرّب.', back);
+    const kb = rows.map(r => [{ text: `${r.name || 'تطبيق'}${r.version ? ' ' + r.version : ''}`.slice(0, 60), callback_data: `pub_${r.app_id}` }]);
+    kb.push(...back);
+    return edit('<b>🚀 نشر فوري</b>\nاضغط التطبيق اللي تبي تنشره الحين (يتخطّى الدور):', kb);
+  }
+  const pn = data.match(/^pub_(\d+)$/);
+  if (pn) {
+    const id = pn[1];
+    const app = await env.DB.prepare("SELECT * FROM queue WHERE app_id=? AND status='pending'").bind(id).first();
+    if (!app) return edit('⚠️ هذا التطبيق ما عاد بالطابور (نُشر أو أُزيل).', back);
+    // مطالبة ذرّية ثم إطلاق فوري بغضّ النظر عن حدّ القسم
+    const claim = await env.DB.prepare("UPDATE queue SET status='processing', processing_at=? WHERE app_id=? AND status='pending'").bind(nowSec(), id).run();
+    if (!claim.meta || claim.meta.changes !== 1) return edit('⚠️ يُعالَج بالفعل الآن.', back);
+    const ok = await dispatchWorker(env, app, await getSetting(env, 'footer', ''));
+    if (!ok) {
+      await env.DB.prepare("UPDATE queue SET status='pending' WHERE app_id=?").bind(id).run();
+      return edit('❌ تعذّر الإطلاق، جرّب بعد لحظات.', back);
+    }
+    await logEvent(env, 'info', `نشر فوري: ${app.name || id}`);
+    return edit(`🚀 <b>يُنشر الآن:</b> ${H(app.name || id)}\n\nبيوصل القناة خلال دقيقة ✅`, back);
+  }
+
+  // حظر فوري من زر تنبيه التخطّي (بالاسم)
+  const bk = data.match(/^blk_(\d+)$/);
+  if (bk) {
+    const id = bk[1];
+    const q = await env.DB.prepare('SELECT name FROM queue WHERE app_id=?').bind(id).first();
+    const nm = q && q.name ? q.name : id;
+    await env.DB.prepare('INSERT OR IGNORE INTO blacklist(app_id,name) VALUES(?,?)').bind(id, nm).run();
+    await env.DB.prepare('DELETE FROM queue WHERE app_id=?').bind(id).run();
+    return edit(`⛔ حُظر: ${H(nm)}\n\nما عاد ينشر إطلاقاً.`, back);
+  }
 
   if (data === 'toggle') {
     const cur = await getSetting(env, 'enabled', '1');
@@ -378,7 +417,7 @@ async function handleCallback(env, cq) {
   if (data === 'black') {
     const rows = (await env.DB.prepare('SELECT name,app_id FROM blacklist LIMIT 20').all()).results;
     const body = rows.length ? rows.map(r => `• ${H(r.name || r.app_id)}`).join('\n') : 'فاضية';
-    return edit(`<b>🚫 القائمة السوداء</b>\n\n${body}\n\nلإضافة: أرسل «حظر &lt;رقم التطبيق&gt;»`, back);
+    return edit(`<b>🚫 القائمة السوداء</b>\n\n${body}\n\nللحظر: اضغط زر «⛔ احظره» اللي يجيك مع تنبيه أي تطبيق.`, back);
   }
   if (data === 'footer') {
     const f = await getSetting(env, 'footer', '');
@@ -461,9 +500,81 @@ async function maybeDailySummary(env) {
   }
   const total = (await env.DB.prepare('SELECT COUNT(*) c FROM published WHERE published_day=?').bind(today).first()).c;
   const errs = (await env.DB.prepare("SELECT COUNT(*) c FROM log WHERE kind='error' AND ts >= ?").bind(nowSec() - 86400).first()).c;
+  // عدّاد المشتركين مع نمو اليوم (مقارنة بأمس)
+  let subsLine = '';
+  const subs = await getSubscriberCount(env);
+  if (subs != null) {
+    const prev = parseInt(await getSetting(env, 'subs_last', '0'), 10) || 0;
+    const diff = subs - prev;
+    const arrow = !prev ? '' : diff > 0 ? ` (+${diff} ▲)` : diff < 0 ? ` (${diff} ▼)` : ' (=)';
+    subsLine = `\n\n👥 مشتركوك: ${subs}${arrow}`;
+    await setSetting(env, 'subs_last', subs);
+  }
   await tg(env, 'sendMessage', {
     chat_id: env.OWNER_ID, parse_mode: 'HTML',
-    text: `<b>📊 ملخص اليوم (${today})</b>\n\nنُشر إجمالاً: ${total}\n\n${lines.join('\n')}\n\n⚠️ أخطاء: ${errs}`,
+    text: `<b>📊 ملخص اليوم (${today})</b>\n\nنُشر إجمالاً: ${total}${subsLine}\n\n${lines.join('\n')}\n\n⚠️ أخطاء: ${errs}`,
+  });
+}
+
+// عدد مشتركي القناة (البوت لازم يكون مشرفاً فيها) — يرجّع null إذا تعذّر (يتخطّى بهدوء)
+async function getSubscriberCount(env) {
+  const channel = env.TG_CHANNEL || await getSetting(env, 'channel', '');
+  if (!channel) return null;
+  try {
+    const r = await tg(env, 'getChatMemberCount', { chat_id: channel });
+    return (r && r.ok && typeof r.result === 'number') ? r.result : null;
+  } catch { return null; }
+}
+
+// تنبيه «النشر متوقف»: نظام يعمل + طابور فيه منتظرون + ما نُشر شي من 6 ساعات (مرة واحدة حتى يعود)
+async function maybeHealthCheck(env) {
+  if (await getSetting(env, 'enabled', '1') !== '1') return;                 // متوقف يدوياً = طبيعي
+  const pausedUntil = parseInt(await getSetting(env, 'paused_until', '0'), 10) || 0;
+  if (pausedUntil && nowSec() < pausedUntil) return;                        // موقوف مؤقتاً = طبيعي
+  const pending = (await env.DB.prepare("SELECT COUNT(*) c FROM queue WHERE status='pending'").first()).c;
+  if (!pending) return;                                                     // ما فيه شي ينتظر = طبيعي
+  const last = parseInt(await getSetting(env, 'last_publish_ts', '0'), 10) || 0;
+  if (!last) return;                                                        // لم ينشر بعد أصلاً = لا إنذار كاذب
+  const since = nowSec() - last;
+  if (since < 6 * 3600) return;                                             // نُشر مؤخراً = تمام
+  if (await getSetting(env, 'health_alerted', '0') === '1') return;         // نبّهنا مسبقاً
+  await setSetting(env, 'health_alerted', '1');
+  await tg(env, 'sendMessage', {
+    chat_id: env.OWNER_ID, parse_mode: 'HTML',
+    text: `🔴 <b>تنبيه: النشر متوقف</b>\n\nصار ${fmtDur(since)} وما نُشر ولا تطبيق، والطابور فيه ${pending} منتظر.\n\nالأسباب المحتملة:\n• اشتراكك بموقع أحمد انتهى\n• مشكلة بجيت هَب أو تلقرام\n\nافتح «🧠 لوحتي» ← 📊 التقرير لتشوف آخر خطأ.`,
+  });
+}
+
+// تقرير أسبوعي (كل جمعة بعد 9 مساءً السعودية، مرة واحدة)
+async function maybeWeeklySummary(env) {
+  const d = new Date((nowSec() + KSA_OFFSET) * 1000);
+  if (d.getUTCDay() !== 5 || d.getUTCHours() < 21) return;                  // الجمعة بعد 9م
+  const today = ksaDay();
+  if ((await getSetting(env, 'weekly_last', '')) === today) return;
+  await setSetting(env, 'weekly_last', today);
+  const weekAgo = ksaDay(nowSec() - 6 * 86400);
+  const total = (await env.DB.prepare('SELECT COUNT(*) c FROM published WHERE published_day >= ?').bind(weekAgo).first()).c;
+  const secs = await loadSections(env, false);
+  const lines = [];
+  let topName = '—', topC = -1;
+  for (const s of secs) {
+    const c = (await env.DB.prepare('SELECT COUNT(*) c FROM published WHERE section=? AND published_day >= ?').bind(s.key, weekAgo).first()).c;
+    lines.push(`${s.name}: ${c}`);
+    if (c > topC) { topC = c; topName = s.name; }
+  }
+  const errs = (await env.DB.prepare("SELECT COUNT(*) c FROM log WHERE kind='error' AND ts >= ?").bind(nowSec() - 7 * 86400).first()).c;
+  let subsLine = '';
+  const subs = await getSubscriberCount(env);
+  if (subs != null) {
+    const prev = parseInt(await getSetting(env, 'subs_week_ago', '0'), 10) || 0;
+    const diff = subs - prev;
+    const arrow = !prev ? '' : diff > 0 ? ` (+${diff} ▲ هالأسبوع)` : diff < 0 ? ` (${diff} ▼ هالأسبوع)` : ' (=)';
+    subsLine = `\n\n👥 المشتركون: ${subs}${arrow}`;
+    await setSetting(env, 'subs_week_ago', subs);
+  }
+  await tg(env, 'sendMessage', {
+    chat_id: env.OWNER_ID, parse_mode: 'HTML',
+    text: `<b>🗓️ تقرير الأسبوع</b>\n\nنُشر إجمالاً: ${total}\nأنشط قسم: ${topName}${subsLine}\n\n${lines.join('\n')}\n\n⚠️ أخطاء الأسبوع: ${errs}`,
   });
 }
 
@@ -561,7 +672,8 @@ export default {
         else if (/chat not found|bot was blocked|CHANNEL_INVALID/i.test(errMsg)) why = 'مشكلة بالوصول للقناة (تحقق من صلاحية البوت)';
         await tg(env, 'sendMessage', {
           chat_id: env.OWNER_ID, parse_mode: 'HTML',
-          text: `⚠️ <b>تُخطّي: ${H(nm)}</b>\nرقم: ${H(body.app_id)}\nالسبب: ${H(why)}`,
+          text: `⚠️ <b>تُخطّي: ${H(nm)}</b>\nالسبب: ${H(why)}`,
+          reply_markup: { inline_keyboard: [[{ text: `⛔ احظره نهائياً`, callback_data: `blk_${body.app_id}` }]] },
         });
       }
       return Response.json({ ok: true });
@@ -572,6 +684,11 @@ export default {
   },
 
   async scheduled(event, env, ctx) {
-    ctx.waitUntil((async () => { await tick(env); await maybeDailySummary(env); })());
+    ctx.waitUntil((async () => {
+      await tick(env);
+      await maybeHealthCheck(env);
+      await maybeDailySummary(env);
+      await maybeWeeklySummary(env);
+    })());
   },
 };
