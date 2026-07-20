@@ -545,12 +545,20 @@ export default {
         // اسم التطبيق + سبب الفشل الواضح
         const q = await env.DB.prepare('SELECT name FROM queue WHERE app_id=?').bind(body.app_id).first();
         const nm = q && q.name ? q.name : body.app_id;
-        let why = errMsg.slice(0, 180);
+        // السبب دائماً بالعربي (لا يظهر خطأ إنجليزي خام للمالك أبداً)
+        let why = 'خطأ غير متوقع أثناء المعالجة';
         if (/wait of \d+ seconds/i.test(errMsg)) why = 'تلقرام حدّ الرفع مؤقتاً (سيُعاد لاحقاً)';
         else if (/two different IP|authorization key/i.test(errMsg)) why = 'الجلسة استُخدمت من مكانين معاً (سيُعاد لاحقاً)';
         else if (/not an IPA/i.test(errMsg)) why = 'الملف المحمّل ليس تطبيقاً سليماً';
         else if (/truncated/i.test(errMsg)) why = 'التحميل انقطع قبل اكتماله';
         else if (/login failed/i.test(errMsg)) why = 'تعذّر تسجيل الدخول لموقع أحمد';
+        else if (/not found in recent/i.test(errMsg)) why = 'التطبيق ما عاد موجوداً بقائمة أحمد';
+        else if (/inject|lief|dylib/i.test(errMsg)) why = 'تعذّر حقن الإضافة بالتطبيق';
+        else if (/timed? ?out|timeout/i.test(errMsg)) why = 'انتهت المهلة (الملف كبير أو الشبكة بطيئة)';
+        else if (/connection|network|resolve|ECONN|SSL|certificate/i.test(errMsg)) why = 'انقطاع بالاتصال أثناء التحميل';
+        else if (/403|forbidden|401|unauthorized/i.test(errMsg)) why = 'رُفض الوصول (صلاحية أو جلسة منتهية)';
+        else if (/space|disk|memory/i.test(errMsg)) why = 'نفدت المساحة أثناء المعالجة';
+        else if (/chat not found|bot was blocked|CHANNEL_INVALID/i.test(errMsg)) why = 'مشكلة بالوصول للقناة (تحقق من صلاحية البوت)';
         await tg(env, 'sendMessage', {
           chat_id: env.OWNER_ID, parse_mode: 'HTML',
           text: `⚠️ <b>تُخطّي: ${H(nm)}</b>\nرقم: ${H(body.app_id)}\nالسبب: ${H(why)}`,
