@@ -193,8 +193,15 @@ async function markPublished(env, app_id, name, version) {
 }
 
 // ---------- لوحة التحكم (أزرار البوت) ----------
+function fmtDur(sec) {
+  const m = Math.max(1, Math.round(sec / 60));
+  return m >= 60 ? `${Math.round(m / 60)} ساعة` : `${m} دقيقة`;
+}
+
 async function panelMain(env) {
   const enabled = await getSetting(env, 'enabled', '1') === '1';
+  const pausedUntil = parseInt(await getSetting(env, 'paused_until', '0'), 10) || 0;
+  const paused = pausedUntil > nowSec();
   const mix = (await getSetting(env, 'mix_mode', '0')) === '1';
   const daily = (await getSetting(env, 'daily_summary', '0')) === '1';
   const secs = await loadSections(env, false);
@@ -207,9 +214,13 @@ async function panelMain(env) {
     lines.push(`${s.name}: ${s.quota}/ساعة  (بالطابور ${q})${on}`);
   }
   const todayCount = (await env.DB.prepare('SELECT COUNT(*) c FROM published WHERE published_day=?').bind(ksaDay()).first()).c;
+  // الحالة الواضحة: متوقف / موقوف مؤقتاً (مع الوقت المتبقي) / يعمل
+  const statusLine = !enabled ? '🔴 متوقف'
+    : paused ? `⏸️ موقوف مؤقتاً (باقي ${fmtDur(pausedUntil - nowSec())})`
+    : '🟢 يعمل';
   const text =
     `<b>🧠 لوحة تحكم النشر</b>\n\n` +
-    `الحالة: ${enabled ? '🟢 يعمل' : '🔴 متوقف'}\n` +
+    `الحالة: ${statusLine}\n` +
     `النمط: ${mix ? '🔀 مخلوط' : '🗂️ مجمّع'}\n` +
     `الإجمالي: ${total}/ساعة\n\n` +
     lines.join('\n') +
@@ -351,14 +362,17 @@ async function handleCallback(env, cq) {
   }
 
   if (data === 'pause') {
+    const pu = parseInt(await getSetting(env, 'paused_until', '0'), 10) || 0;
+    const nowState = pu > nowSec() ? `⏸️ موقوف مؤقتاً حالياً — باقي ${fmtDur(pu - nowSec())}` : '🟢 النشر يعمل الآن (غير موقوف)';
     const kb = [[{ text: 'ساعة', callback_data: 'pause_1' }, { text: '3 ساعات', callback_data: 'pause_3' }, { text: 'يوم', callback_data: 'pause_24' }],
-                [{ text: '▶️ إلغاء الإيقاف', callback_data: 'pause_0' }], ...back];
-    return edit('<b>🕐 إيقاف مؤقت للنشر</b>', kb);
+                [{ text: '▶️ إلغاء الإيقاف المؤقت', callback_data: 'pause_0' }], ...back];
+    return edit(`<b>🕐 إيقاف مؤقت للنشر</b>\n\n${nowState}\n\nاختر مدة الإيقاف، أو ألغِه:`, kb);
   }
   if (data.startsWith('pause_')) {
     const h = parseInt(data.split('_')[1], 10);
     await setSetting(env, 'paused_until', h ? nowSec() + h * 3600 : 0);
-    const p = await panelMain(env); return edit(h ? `⏸️ توقف ${h} ساعة.` : '▶️ استُؤنف.', p.kb);
+    const p = await panelMain(env);
+    return edit(h ? `⏸️ تم الإيقاف المؤقت ${fmtDur(h * 3600)}. (شوف الحالة فوق)` : '▶️ أُلغي الإيقاف — النشر يعمل الآن.', p.kb);
   }
 
   if (data === 'black') {
