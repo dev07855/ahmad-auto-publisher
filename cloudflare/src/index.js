@@ -273,8 +273,9 @@ async function handleCallback(env, cq) {
   if (data === 'report') {
     const today = (await env.DB.prepare('SELECT COUNT(*) c FROM published WHERE published_day=?').bind(ksaDay()).first()).c;
     const errs = (await env.DB.prepare("SELECT msg FROM log WHERE kind='error' ORDER BY id DESC LIMIT 3").all()).results;
-    const last = (await env.DB.prepare("SELECT name,published_at FROM published ORDER BY published_at DESC LIMIT 5").all()).results;
-    const lastTxt = last.map(r => `• ${H(r.name)}`).join('\n') || '—';
+    // أسماء آخر ما نُشر تُقرأ من سجل الأحداث (kind='ok' = "نُشر [قسم]: الاسم")
+    const last = (await env.DB.prepare("SELECT msg FROM log WHERE kind='ok' ORDER BY id DESC LIMIT 5").all()).results;
+    const lastTxt = last.map(r => `• ${H(r.msg)}`).join('\n') || '—';
     const errTxt = errs.length ? '\n\n⚠️ آخر أخطاء:\n' + errs.map(e => '• ' + H(e.msg)).join('\n') : '';
     return edit(`<b>📊 التقرير</b>\n\nنُشر اليوم: ${today}\n\nآخر ما نُشر:\n${lastTxt}${errTxt}`, back);
   }
