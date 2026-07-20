@@ -373,7 +373,8 @@ async function handleCallback(env, cq) {
 }
 
 async function handleMessage(env, msg) {
-  const text = (msg.text || '').trim();
+  // ادعم الرسائل المُحوّلة/الصور (نصها في caption لا text)
+  const text = (msg.text || msg.caption || '').trim();
   const reply = (t) => tg(env, 'sendMessage', { chat_id: msg.chat.id, text: t });
   if (text === '/start' || text === '/panel' || text === 'لوحة' || text === '🧠 لوحتي') {
     await setSetting(env, 'await', '');  // أي ضغطة على اللوحة تلغي وضع الانتظار
