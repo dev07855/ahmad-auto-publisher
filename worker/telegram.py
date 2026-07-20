@@ -11,6 +11,7 @@ Env / config keys:
 import os, asyncio
 from telethon import TelegramClient
 from telethon.sessions import StringSession
+from telethon.tl.types import DocumentAttributeFilename
 
 def _client(cfg):
     # in-memory session; bot login is instant and stateless
@@ -21,16 +22,23 @@ async def _publish(cfg, ipa_path, caption, photos):
     await client.start(bot_token=cfg["bot_token"])
     try:
         chan = cfg["channel"]
-        # 1) album of screenshots + caption (photos are small, well under limits)
+        fname = os.path.basename(ipa_path)
+
+        # 1) PRE-UPLOAD the big IPA to Telegram FIRST (the slow part) — nothing is
+        #    posted to the channel yet. This guarantees the file is ready before any text.
+        handle = await client.upload_file(ipa_path, part_size_kb=512)
+
+        # 2) now that the file is ready, post description (+icon) THEN the file
+        #    back-to-back — no gap where the description shows without its app.
         if photos:
             await client.send_file(chan, photos, caption=caption, parse_mode="html")
             file_caption = None
         else:
             file_caption = caption
-        # 2) the injected IPA as a document (progress-friendly, up to 2GB via MTProto)
         await client.send_file(
-            chan, ipa_path, caption=file_caption, parse_mode="html",
-            force_document=True, part_size_kb=512,
+            chan, handle, caption=file_caption, parse_mode="html",
+            force_document=True,
+            attributes=[DocumentAttributeFilename(fname)],
         )
     finally:
         await client.disconnect()
