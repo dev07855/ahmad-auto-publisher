@@ -26,12 +26,13 @@ async def _publish_once(cfg, ipa_path, caption, thumb):
         fname = os.path.basename(ipa_path)
 
         # ONE cohesive premium message: the IPA document carries the app icon as its
-        # thumbnail AND the formatted features as its caption. Uploading (the slow part)
-        # finishes before the single message is posted, so nothing shows without its file.
-        handle = await client.upload_file(ipa_path, part_size_kb=512)
+        # thumbnail AND the formatted features as its caption. Passing the file PATH
+        # directly (not a pre-uploaded handle) makes Telethon reliably attach the thumb,
+        # and it still posts as a SINGLE atomic message that only appears AFTER the upload
+        # finishes — so there is no gap and the icon always shows.
         await client.send_file(
-            chan, handle, caption=caption, parse_mode="html",
-            force_document=True, thumb=thumb,
+            chan, ipa_path, caption=caption, parse_mode="html",
+            force_document=True, thumb=thumb, part_size_kb=512,
             attributes=[DocumentAttributeFilename(fname)],
         )
     finally:
