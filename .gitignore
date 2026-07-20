@@ -4,3 +4,5 @@ __pycache__/
 *.dylib
 link_notes.txt
 .DS_Store
+
+.wrangler/
