@@ -20,27 +20,34 @@ class Ahmad:
     # ---- auth ----
     def _hidden_fields(self):
         """Grab ALL hidden inputs from the sign-in form (the site ships two dynamic
-        ones: `token` = CSRF, and `login` = a per-page signed value). Both are required."""
+        ones: `token` = CSRF, and `login` = a per-page signed value). Both are required.
+        Supports single/double quotes and HTML-unescapes the values."""
         r = self.s.get(f"{BASE}/sign-in", timeout=30)
         r.raise_for_status()
+        # narrow to the sign-in form when possible, so unrelated hidden inputs are ignored
+        m = re.search(r'<form[^>]*login-member.*?</form>', r.text, re.I | re.S) \
+            or re.search(r'<form[^>]*id=["\']loginMembers["\'].*?</form>', r.text, re.I | re.S)
+        scope = m.group(0) if m else r.text
         fields = {}
-        for m in re.finditer(r'<input[^>]*type="hidden"[^>]*>', r.text):
-            tag = m.group(0)
-            nm = re.search(r'name="([^"]+)"', tag)
-            vl = re.search(r'value="([^"]*)"', tag)
+        for tag in re.finditer(r'<input[^>]*type=["\']hidden["\'][^>]*>', scope, re.I):
+            t = tag.group(0)
+            nm = re.search(r'name=["\']([^"\']+)["\']', t)
+            vl = re.search(r'value=["\']([^"\']*)["\']', t)
             if nm:
-                fields[nm.group(1)] = vl.group(1) if vl else ""
+                fields[nm.group(1)] = html.unescape(vl.group(1)) if vl else ""
         return fields
 
     def login(self, email, password):
         data = self._hidden_fields()          # includes token + login (correct values)
+        if "token" not in data:
+            return False, "sign-in form / CSRF token not found"
         data["email"] = email
         data["password"] = password
         r = self.s.post(f"{BASE}/users/login-member", data=data, timeout=30,
                         headers={"X-Requested-With": "XMLHttpRequest", "Referer": f"{BASE}/sign-in"})
-        # verify by loading a gated page and checking we are NOT bounced to sign-in
+        # verify: a gated page must both contain download links AND not bounce to sign-in
         chk = self.s.get(f"{BASE}/last-app-update", timeout=30)
-        ok = "download/link" in chk.text
+        ok = ("download/link/" in chk.text) and ("/sign-in" not in chk.url)
         return ok, re.sub(r'<[^>]+>', ' ', (r.text or ""))[:200].strip()
 
     # ---- listing ----
@@ -52,23 +59,35 @@ class Ahmad:
 
     @staticmethod
     def parse_listing(page_html, limit=None):
-        """Pair each app with the FIRST download link that appears AFTER its detail link.
-        Card layout in the HTML is: [ID, ID, DL, DL] per app, in page order (top=newest).
+        """Pair each app with the download link that belongs to ITS card only.
+
+        Card layout in page order is: [ID, ID, DL, DL] per app (top = newest). The
+        download link for app N is the first DL that appears AFTER app N's detail link
+        AND BEFORE the next distinct app's detail link. If a card has no download link
+        (e.g. a restricted item), that app is SKIPPED — never paired with a neighbour's
+        link (which would publish the wrong IPA under this app's name).
         """
         out, seen = [], set()
-        detail_iter = list(re.finditer(r'ref\?app=(\d+)', page_html))
-        dl_iter = [(m.start(), m.group(1)) for m in re.finditer(r'download/link/([A-Za-z0-9=]+)', page_html)]
-        for dm in detail_iter:
+        # base64 / base64url token — must allow + / - _ and =, not just alnum
+        dl_iter = [(m.start(), m.group(1))
+                   for m in re.finditer(r'download/link/([A-Za-z0-9+/=_-]+)', page_html)]
+        details = list(re.finditer(r'ref\?app=(\d+)', page_html))
+        for idx, dm in enumerate(details):
             app_id = dm.group(1)
             if app_id in seen:
                 continue
-            pos = dm.start()
-            # first download link occurring after this app's detail link
-            nxt = next((b for (i, b) in dl_iter if i > pos), None)
-            if not nxt:
-                continue
+            start = dm.start()
+            # boundary = position of the next DIFFERENT app id (card end)
+            end = len(page_html)
+            for nxt in details[idx + 1:]:
+                if nxt.group(1) != app_id:
+                    end = nxt.start()
+                    break
+            blob = next((b for (i, b) in dl_iter if start < i < end), None)
             seen.add(app_id)
-            out.append({"id": app_id, "download_url": f"{BASE}/download/link/{nxt}"})
+            if not blob:
+                continue  # no link inside this card → skip, do NOT borrow a neighbour's
+            out.append({"id": app_id, "download_url": f"{BASE}/download/link/{blob}"})
             if limit and len(out) >= limit:
                 break
         return out
@@ -78,12 +97,12 @@ class Ahmad:
         r = self.s.get(f"{BASE}/api/app-info/{app_id}", timeout=30)
         r.raise_for_status()
         j = r.json()
-        if not j.get("success"):
-            raise RuntimeError(f"app-info failed for {app_id}: {j}")
+        if not j.get("success") or not j.get("app"):
+            raise RuntimeError(f"app-info failed for {app_id}: {str(j)[:200]}")
         return j["app"]
 
     # ---- public download (no auth) ----
-    def download(self, url, dest, progress=False):
+    def download(self, url, dest, verify_ipa=False):
         with self.s.get(url, stream=True, timeout=120) as r:
             r.raise_for_status()
             total = int(r.headers.get("content-length", 0))
@@ -92,12 +111,24 @@ class Ahmad:
                 for chunk in r.iter_content(chunk_size=1 << 20):
                     f.write(chunk)
                     done += len(chunk)
-            return dest, total, done
+        # integrity: truncated download?
+        if total and done != total:
+            raise RuntimeError(f"download truncated: got {done} of {total} bytes ({url[:60]})")
+        # sanity: an IPA must be a real ZIP (PK\x03\x04). If the session expired the
+        # server returns an HTML sign-in page with HTTP 200 — catch that here.
+        if verify_ipa:
+            with open(dest, "rb") as f:
+                if f.read(4) != b"PK\x03\x04":
+                    raise RuntimeError("downloaded file is not an IPA (bad session or dead link?)")
+        return dest, total, done
 
 
 def clean_name(name, version):
-    safe = re.sub(r'[^\w؀-ۿ .-]', '', name).strip().replace(' ', '_')
-    return f"{safe}-{version}.ipa" if version else f"{safe}.ipa"
+    safe = re.sub(r'[^\w .-]', '', name or '', flags=re.UNICODE).strip().replace(' ', '_')
+    ver = re.sub(r'[^\w.-]', '', version or '')
+    if not safe:
+        safe = "app"
+    return f"{safe}-{ver}.ipa" if ver else f"{safe}.ipa"
 
 
 if __name__ == "__main__":

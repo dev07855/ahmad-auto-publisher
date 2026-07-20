@@ -19,9 +19,11 @@ from ahmad import Ahmad, clean_name
 import inject as injector
 
 def _clean_desc(desc):
-    # strip any ahmad references / links
+    # strip any ahmad references / links (latin + arabic + telegram handles)
     desc = re.sub(r'https?://\S*ahmad\S*', '', desc, flags=re.I)
     desc = re.sub(r'(?i)ahmad[\s\-_]*up|ahmad\s*dev|@\w*ahmad\w*', '', desc)
+    desc = re.sub(r'أحمد\s*ديف|احمد\s*ديف|متجر\s*أحمد|متجر\s*احمد', '', desc)
+    desc = re.sub(r'(?i)ahmad', '', desc)
     return desc
 
 
@@ -41,65 +43,91 @@ def _format_features(desc):
     return lines
 
 
-def build_caption(info):
+CAPTION_LIMIT = 1024  # Telegram media-caption hard limit (visible chars)
+
+
+def build_caption(info, footer=None):
     """Premium one-message caption: title • version/size, then tidy feature bullets, then footer.
-    Used as the CAPTION of the IPA document (icon shown as its thumbnail)."""
-    name = info.get("name", "").strip()
-    ver = info.get("version", "").strip()
+    Used as the CAPTION of the IPA document (icon shown as its thumbnail).
+
+    Truncation is done on the RAW feature list (whole bullets only) BEFORE HTML-escaping,
+    so we never cut an HTML entity in half (which Telegram would reject), and the final
+    visible length is kept within Telegram's limit.
+    """
+    name = (info.get("name") or "").strip()
+    ver = (info.get("version") or "").strip()
     size_mb = round(int(info.get("size", 0)) / 1048576, 1) if str(info.get("size", "")).isdigit() else None
     desc = _clean_desc((info.get("description") or "").strip())
-    footer = os.environ.get("CHANNEL_FOOTER", "").strip()
+    if footer is None:
+        footer = os.environ.get("CHANNEL_FOOTER", "").strip()
     feats = _format_features(desc)
 
-    parts = [f"📲 <b>{html.escape(name)}</b>"]
+    header = [f"📲 <b>{html.escape(name)}</b>"]
     meta = []
     if ver: meta.append(f"الإصدار {html.escape(ver)}")
     if size_mb: meta.append(f"{size_mb} MB")
-    if meta: parts.append("🔖 " + " • ".join(meta))
-    if feats:
-        parts.append("")
-        parts.append("✨ <b>المميزات:</b>")
-        body = "\n".join(f"▫️ {html.escape(f)}" for f in feats)
-        # Telegram caption hard-limit is 1024 chars; keep room for header/footer
-        if len(body) > 750:
-            body = body[:750].rsplit("\n", 1)[0]
-        parts.append(body)
-    if footer:
-        parts += ["", footer]
+    if meta: header.append("🔖 " + " • ".join(meta))
+
+    footer_block = (["", html.escape(footer)] if footer else [])
+    # budget for the feature body (in visible chars): limit minus header + footer + label
+    fixed_len = len("\n".join(header + ["", "✨ المميزات:"] + [x for x in footer_block]))
+    budget = CAPTION_LIMIT - fixed_len - 8  # small safety margin
+
+    body_lines, used = [], 0
+    for f in feats:
+        line = f"▫️ {f}"                       # measure on RAW text (visible length)
+        if used + len(line) + 1 > budget:
+            break
+        body_lines.append(f"▫️ {html.escape(f)}")  # escape only what we keep
+        used += len(line) + 1
+
+    parts = list(header)
+    if body_lines:
+        parts += ["", "✨ <b>المميزات:</b>", "\n".join(body_lines)]
+    parts += footer_block
     return "\n".join(parts)
 
-def process(app_id, download_url=None):
+def process(app_id, download_url=None, footer=None):
+    # validate inputs (defence-in-depth: app_id numeric, download_url on ahmad only)
+    if not re.fullmatch(r'\d+', str(app_id)):
+        raise RuntimeError(f"invalid app_id: {app_id!r}")
+    if download_url and not download_url.startswith("https://ahmad-up.com/"):
+        raise RuntimeError("download_url must be on ahmad-up.com")
+
     a = Ahmad()
     # metadata (public, no auth)
     info = a.app_info(app_id)
-    print(f"[info] {info['name']} v{info.get('version')}")
+    print(f"[info] {info.get('name')} v{info.get('version')}")
 
     # resolve download link if not supplied (needs login)
     if not download_url:
         email = os.environ.get("AHMAD_EMAIL"); pw = os.environ.get("AHMAD_PASSWORD")
         if not (email and pw):
-            raise SystemExit("download_url not given and AHMAD_EMAIL/PASSWORD missing")
+            raise RuntimeError("download_url not given and AHMAD_EMAIL/PASSWORD missing")
         ok, msg = a.login(email, pw)
         if not ok:
-            raise SystemExit(f"ahmad login failed: {msg}")
+            raise RuntimeError(f"ahmad login failed: {msg}")
         row = next((r for r in a.list_recent() if r["id"] == str(app_id)), None)
         if not row:
-            raise SystemExit(f"app {app_id} not found in recent listing")
+            raise RuntimeError(f"app {app_id} not found in recent listing")
         download_url = row["download_url"]
 
     work = tempfile.mkdtemp(prefix="app_")
     raw = os.path.join(work, "raw.ipa")
     print("[download] ...")
-    _, total, done = a.download(download_url, raw)
+    _, total, done = a.download(download_url, raw, verify_ipa=True)
     print(f"[download] {done} bytes")
 
     # MANDATORY dylib injection gate — nothing publishes without it
-    out = os.path.join(work, clean_name(info["name"], info.get("version", "")))
+    out = os.path.join(work, clean_name(info.get("name"), info.get("version", "")))
     dylib = os.environ.get("DYLIB_PATH", "fixipa.dylib")
     injector.main(raw, dylib, out)
     print(f"[inject] -> {os.path.basename(out)}")
+    # raw IPA no longer needed — free the disk immediately
+    try: os.remove(raw)
+    except OSError: pass
 
-    caption = build_caption(info)
+    caption = build_caption(info, footer=footer)
     # download the icon and turn it into a small JPEG thumbnail for the document
     # (shown ON the file itself, like a premium post — one cohesive message).
     thumb = None
@@ -118,6 +146,8 @@ def process(app_id, download_url=None):
     return out, caption, thumb, info
 
 if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        raise SystemExit("usage: main.py <app_id> [download_url]")
     app_id = sys.argv[1]
     dl = sys.argv[2] if len(sys.argv) > 2 else None
     out, caption, thumb, info = process(app_id, dl)

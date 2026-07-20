@@ -31,6 +31,7 @@ def main():
                          headers={"x-secret": os.environ["ENQUEUE_SECRET"]},
                          json={"apps": apps}, timeout=60)
     print("enqueue:", resp.status_code, resp.text[:200])
+    resp.raise_for_status()  # fail the job loudly if the brain rejected the batch
 
 if __name__ == "__main__":
     main()

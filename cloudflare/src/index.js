@@ -36,7 +36,7 @@ async function tg(env, method, payload) {
 const H = (s) => String(s ?? '').replace(/[<&>]/g, (c) => ({ '<': '&lt;', '&': '&amp;', '>': '&gt;' }[c]));
 
 // ---------- تشغيل عامل GitHub ----------
-async function dispatchWorker(env, app) {
+async function dispatchWorker(env, app, footer) {
   const res = await fetch(`https://api.github.com/repos/${env.GH_REPO}/dispatches`, {
     method: 'POST',
     headers: {
@@ -45,30 +45,39 @@ async function dispatchWorker(env, app) {
       'User-Agent': 'ahmad-auto-publisher',
       'content-type': 'application/json',
     },
-    body: JSON.stringify({ event_type: 'publish_app', client_payload: { app_id: app.app_id, download_url: app.download_url } }),
+    body: JSON.stringify({ event_type: 'publish_app', client_payload: { app_id: app.app_id, download_url: app.download_url, footer: footer || '' } }),
   });
   return res.ok;
 }
 
 // ---------- المنطق الأساسي: الطابور ----------
+const isValidDL = (u) => typeof u === 'string' && u.startsWith('https://ahmad-up.com/download/link/');
+const isValidId = (v) => /^\d+$/.test(String(v));
+
 async function enqueueApps(env, apps) {
   // apps: [{id, name, version, download_url, rank}] بترتيب الصفحة (rank=0 أعلى)
+  if (!Array.isArray(apps)) return 0;
   let added = 0;
   const today = ksaDay();
+  const dedup = (await getSetting(env, 'dedup_per_day', '1')) === '1';
   for (const a of apps) {
+    // تحقق صارم: رقم صحيح + رابط تحميل على نطاق أحمد فقط
+    if (!a || !isValidId(a.id) || !isValidDL(a.download_url)) continue;
     const bl = await env.DB.prepare('SELECT 1 FROM blacklist WHERE app_id=?').bind(a.id).first();
     if (bl) continue;
     // نُشر اليوم؟ تجاهل (منع تكرار مرة/يوم)
-    if (await getSetting(env, 'dedup_per_day', '1') === '1') {
+    if (dedup) {
       const pub = await env.DB.prepare('SELECT 1 FROM published WHERE app_id=? AND published_day=?')
         .bind(a.id, today).first();
       if (pub) continue;
     }
-    // موجود بالطابور؟ حدّث الإصدار/الرابط (نبقي الأحدث) دون تغيير ترتيبه
-    const ex = await env.DB.prepare('SELECT app_id FROM queue WHERE app_id=?').bind(a.id).first();
+    // موجود بالطابور؟ حدّث الإصدار/الرابط فقط إن كان pending (لا نلمس ما هو processing) ودون تغيير ترتيبه
+    const ex = await env.DB.prepare('SELECT status FROM queue WHERE app_id=?').bind(a.id).first();
     if (ex) {
-      await env.DB.prepare('UPDATE queue SET version=?, download_url=?, name=? WHERE app_id=?')
-        .bind(a.version || '', a.download_url, a.name || '', a.id).run();
+      if (ex.status === 'pending') {
+        await env.DB.prepare('UPDATE queue SET version=?, download_url=?, name=? WHERE app_id=? AND status=?')
+          .bind(a.version || '', a.download_url, a.name || '', a.id, 'pending').run();
+      }
       continue;
     }
     await env.DB.prepare('INSERT INTO queue(app_id,name,version,download_url,rank,added_at,status) VALUES(?,?,?,?,?,?,?)')
@@ -79,23 +88,40 @@ async function enqueueApps(env, apps) {
   return added;
 }
 
-async function publishedLastHour(env) {
-  const r = await env.DB.prepare('SELECT COUNT(*) c FROM published WHERE published_at >= ?')
+const PROCESSING_TIMEOUT = 20 * 60; // ثانية: بعدها نعتبر العامل مات ونعيد التطبيق للطابور
+
+// عدد ما نُشر آخر ساعة + ما هو قيد المعالجة الآن (كلاهما يُحسب ضمن حدّ per_hour)
+async function inFlightThisHour(env) {
+  const p = await env.DB.prepare('SELECT COUNT(*) c FROM published WHERE published_at >= ?')
     .bind(nowSec() - 3600).first();
-  return r ? r.c : 0;
+  const q = await env.DB.prepare("SELECT COUNT(*) c FROM queue WHERE status='processing'").first();
+  return (p ? p.c : 0) + (q ? q.c : 0);
+}
+
+function safePerHour(v) {
+  const n = parseInt(v, 10);
+  return (Number.isFinite(n) && n > 0 && n <= 60) ? n : 10;  // fallback آمن، لا NaN أبداً
+}
+
+// أعِد أي تطبيق عالق في processing أقدم من المهلة إلى pending
+async function reclaimStuck(env) {
+  await env.DB.prepare("UPDATE queue SET status='pending' WHERE status='processing' AND processing_at < ?")
+    .bind(nowSec() - PROCESSING_TIMEOUT).run();
 }
 
 // يُنادى من الكرون: أطلق تطبيقاً واحداً إن سمحت القواعد
 async function tick(env) {
   if (await getSetting(env, 'enabled', '1') !== '1') return 'disabled';
-  const pausedUntil = parseInt(await getSetting(env, 'paused_until', '0'), 10);
+  const pausedUntil = parseInt(await getSetting(env, 'paused_until', '0'), 10) || 0;
   if (pausedUntil && nowSec() < pausedUntil) return 'paused';
 
-  const perHour = parseInt(await getSetting(env, 'per_hour', '10'), 10);
-  if (await publishedLastHour(env) >= perHour) return 'hour_full';
+  await reclaimStuck(env);
+
+  const perHour = safePerHour(await getSetting(env, 'per_hour', '10'));
+  if (await inFlightThisHour(env) >= perHour) return 'hour_full';
 
   const today = ksaDay();
-  // التالي بالترتيب: الأعلى بالصفحة (rank أصغر) ثم الأقدم إدخالاً، وغير منشور اليوم، وغير قيد المعالجة
+  // التالي بالترتيب: الأعلى بالصفحة (rank أصغر) ثم الأقدم إدخالاً، وغير منشور اليوم
   const next = await env.DB.prepare(
     `SELECT * FROM queue
        WHERE status='pending'
@@ -103,8 +129,14 @@ async function tick(env) {
        ORDER BY rank ASC, added_at ASC LIMIT 1`).bind(today).first();
   if (!next) return 'empty';
 
-  await env.DB.prepare("UPDATE queue SET status='processing' WHERE app_id=?").bind(next.app_id).run();
-  const ok = await dispatchWorker(env, next);
+  // مطالبة ذرّية: لا يُطلق إلا من ينجح في تغيير الصف من pending→processing (يمنع السباق)
+  const claim = await env.DB.prepare(
+    "UPDATE queue SET status='processing', processing_at=? WHERE app_id=? AND status='pending'")
+    .bind(nowSec(), next.app_id).run();
+  if (!claim.meta || claim.meta.changes !== 1) return 'claimed_by_other';
+
+  const footer = await getSetting(env, 'footer', '');
+  const ok = await dispatchWorker(env, next, footer);
   if (!ok) {
     await env.DB.prepare("UPDATE queue SET status='pending' WHERE app_id=?").bind(next.app_id).run();
     await logEvent(env, 'error', `فشل إطلاق العامل للتطبيق ${next.app_id}`);
@@ -126,7 +158,7 @@ async function markPublished(env, app_id, name, version) {
 // ---------- لوحة التحكم (أزرار البوت) ----------
 async function panelMain(env) {
   const enabled = await getSetting(env, 'enabled', '1') === '1';
-  const perHour = await getSetting(env, 'per_hour', '10');
+  const perHour = safePerHour(await getSetting(env, 'per_hour', '10'));
   const qc = (await env.DB.prepare('SELECT COUNT(*) c FROM queue').first()).c;
   const todayCount = (await env.DB.prepare('SELECT COUNT(*) c FROM published WHERE published_day=?').bind(ksaDay()).first()).c;
   const text =
@@ -149,6 +181,7 @@ async function handleCallback(env, cq) {
   const data = cq.data;
   const chatId = cq.message.chat.id;
   const msgId = cq.message.message_id;
+  await tg(env, 'answerCallbackQuery', { callback_query_id: cq.id }); // يوقف مؤشّر التحميل على الزر
   const edit = (text, kb) => tg(env, 'editMessageText', {
     chat_id: chatId, message_id: msgId, text, parse_mode: 'HTML',
     reply_markup: { inline_keyboard: kb }, disable_web_page_preview: true,
@@ -189,7 +222,7 @@ async function handleCallback(env, cq) {
     return edit('<b>⚙️ اختر السرعة</b>', kb);
   }
   if (data.startsWith('rate_')) {
-    await setSetting(env, 'per_hour', data.split('_')[1]);
+    await setSetting(env, 'per_hour', String(safePerHour(data.split('_')[1])));
     const p = await panelMain(env); return edit(p.text, p.kb);
   }
 
@@ -213,7 +246,6 @@ async function handleCallback(env, cq) {
     const f = await getSetting(env, 'footer', '');
     return edit(`<b>✍️ فوتر المنشور</b>\n\nالحالي:\n${H(f) || '(فاضي)'}\n\nلتغييره: أرسل «فوتر: النص الجديد»`, back);
   }
-  return tg(env, 'answerCallbackQuery', { callback_query_id: cq.id });
 }
 
 async function handleMessage(env, msg) {
@@ -239,9 +271,16 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
-    // بوت تلقرام
+    const readJson = async () => { try { return await request.json(); } catch { return null; } };
+
+    // بوت تلقرام — لازم توكن تلقرام السري (يمنع انتحال المالك عبر رقمه العام)
     if (url.pathname === '/telegram' && request.method === 'POST') {
-      const u = await request.json();
+      if (env.TG_WEBHOOK_SECRET &&
+          request.headers.get('X-Telegram-Bot-Api-Secret-Token') !== env.TG_WEBHOOK_SECRET) {
+        return new Response('forbidden', { status: 403 });
+      }
+      const u = await readJson();
+      if (!u) return new Response('ok');
       const from = u.callback_query ? u.callback_query.from : (u.message ? u.message.from : null);
       if (!from || String(from.id) !== String(env.OWNER_ID)) return new Response('ok'); // للمالك فقط
       if (u.callback_query) await handleCallback(env, u.callback_query);
@@ -252,33 +291,30 @@ export default {
     // إدخال تطبيقات من الماسح
     if (url.pathname === '/enqueue' && request.method === 'POST') {
       if (request.headers.get('x-secret') !== env.ENQUEUE_SECRET) return new Response('forbidden', { status: 403 });
-      const { apps } = await request.json();
-      const added = await enqueueApps(env, apps || []);
+      const body = await readJson();
+      if (!body) return new Response('bad request', { status: 400 });
+      const added = await enqueueApps(env, body.apps || []);
       return Response.json({ ok: true, added });
     }
 
     // تأكيد نشر من العامل
     if (url.pathname === '/published' && request.method === 'POST') {
       if (request.headers.get('x-secret') !== env.ENQUEUE_SECRET) return new Response('forbidden', { status: 403 });
-      const { app_id, name, version } = await request.json();
-      await markPublished(env, app_id, name, version);
+      const body = await readJson();
+      if (!body || !isValidId(body.app_id)) return new Response('bad request', { status: 400 });
+      await markPublished(env, body.app_id, body.name, body.version);
       return Response.json({ ok: true });
     }
 
     // فشل من العامل (يرجّع للطابور + تنبيه المالك)
     if (url.pathname === '/failed' && request.method === 'POST') {
       if (request.headers.get('x-secret') !== env.ENQUEUE_SECRET) return new Response('forbidden', { status: 403 });
-      const { app_id, error } = await request.json();
-      await env.DB.prepare("UPDATE queue SET status='pending' WHERE app_id=?").bind(app_id).run();
-      await logEvent(env, 'error', `فشل ${app_id}: ${error}`);
-      await tg(env, 'sendMessage', { chat_id: env.OWNER_ID, text: `⚠️ فشل نشر التطبيق ${app_id}\n${error}` });
+      const body = await readJson();
+      if (!body || !isValidId(body.app_id)) return new Response('bad request', { status: 400 });
+      await env.DB.prepare("UPDATE queue SET status='pending' WHERE app_id=?").bind(body.app_id).run();
+      await logEvent(env, 'error', `فشل ${body.app_id}: ${String(body.error || '').slice(0, 200)}`);
+      await tg(env, 'sendMessage', { chat_id: env.OWNER_ID, text: `⚠️ فشل نشر التطبيق ${H(body.app_id)}\n${H(String(body.error || '').slice(0, 200))}` });
       return Response.json({ ok: true });
-    }
-
-    // ويبهوك أحمد (اختياري — لو فُعّل مستقبلاً)
-    if (url.pathname === '/webhook/ahmad' && request.method === 'POST') {
-      await logEvent(env, 'info', 'وصل ويبهوك من أحمد');
-      return new Response('ok');
     }
 
     if (url.pathname === '/') return new Response('ahmad-auto-publisher: alive');

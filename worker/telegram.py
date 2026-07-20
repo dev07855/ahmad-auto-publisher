@@ -12,12 +12,13 @@ import os, asyncio
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.tl.types import DocumentAttributeFilename
+from telethon.errors import FloodWaitError
 
 def _client(cfg):
     # in-memory session; bot login is instant and stateless
     return TelegramClient(StringSession(), int(cfg["api_id"]), cfg["api_hash"])
 
-async def _publish(cfg, ipa_path, caption, thumb):
+async def _publish_once(cfg, ipa_path, caption, thumb):
     client = _client(cfg)
     await client.start(bot_token=cfg["bot_token"])
     try:
@@ -35,6 +36,23 @@ async def _publish(cfg, ipa_path, caption, thumb):
         )
     finally:
         await client.disconnect()
+
+async def _publish(cfg, ipa_path, caption, thumb):
+    # transient errors (network blips, Telegram FloodWait) shouldn't fail a good app
+    last = None
+    for attempt in range(3):
+        try:
+            return await _publish_once(cfg, ipa_path, caption, thumb)
+        except FloodWaitError as e:
+            wait = min(int(getattr(e, "seconds", 30)) + 2, 120)
+            print(f"[tg] flood wait {wait}s (attempt {attempt+1})")
+            await asyncio.sleep(wait)
+            last = e
+        except Exception as e:
+            print(f"[tg] error (attempt {attempt+1}): {e}")
+            last = e
+            await asyncio.sleep(5 * (attempt + 1))
+    raise last
 
 def publish(cfg, ipa_path, caption, thumb=None):
     """cfg = {api_id, api_hash, bot_token, channel}. thumb = local jpg path for the doc icon."""

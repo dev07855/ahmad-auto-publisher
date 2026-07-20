@@ -2,9 +2,9 @@
 """
 غلاف عامل النشر (يُنادى من GitHub Actions عبر repository_dispatch).
 يعالج التطبيق، ينشره، ويبلّغ عقل كلاودفلير بالنتيجة (/published أو /failed).
-Env: APP_ID, DL, + أسرار main/telegram + BRAIN_URL, ENQUEUE_SECRET
+Env: APP_ID, DL, FOOTER(optional) + أسرار main/telegram + BRAIN_URL, ENQUEUE_SECRET
 """
-import os, sys, traceback, requests
+import os, sys, shutil, traceback, requests
 import main as worker
 import telegram
 
@@ -19,15 +19,21 @@ def notify(path, payload):
 def run():
     app_id = os.environ["APP_ID"]
     dl = os.environ.get("DL") or None
+    footer = os.environ.get("FOOTER") or None  # per-run footer from the brain (falls back to env)
+    workdir = None
     try:
-        out, caption, photos, info = worker.process(app_id, dl)
-        telegram.publish(telegram.cfg_from_env(), out, caption, photos)
+        out, caption, thumb, info = worker.process(app_id, dl, footer=footer)
+        workdir = os.path.dirname(out)
+        telegram.publish(telegram.cfg_from_env(), out, caption, thumb)
         notify("/published", {"app_id": app_id, "name": info.get("name", ""), "version": info.get("version", "")})
         print("PUBLISHED", app_id, info.get("name"))
-    except Exception as e:
+    except BaseException as e:  # includes SystemExit — MUST always report so nothing sticks in the queue
         traceback.print_exc()
-        notify("/failed", {"app_id": app_id, "error": str(e)[:300]})
+        notify("/failed", {"app_id": app_id, "error": str(e)[:300] or type(e).__name__})
         sys.exit(1)
+    finally:
+        if workdir and os.path.isdir(workdir):
+            shutil.rmtree(workdir, ignore_errors=True)
 
 if __name__ == "__main__":
     run()

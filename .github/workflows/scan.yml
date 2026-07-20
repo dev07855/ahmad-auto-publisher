@@ -2,9 +2,15 @@ name: scan-updates
 on:
   schedule: [{ cron: '*/10 * * * *' }]
   workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: scan-updates
+  cancel-in-progress: false
 jobs:
   scan:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
