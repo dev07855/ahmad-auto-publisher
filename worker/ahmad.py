@@ -111,6 +111,9 @@ class Ahmad:
                 for chunk in r.iter_content(chunk_size=1 << 20):
                     f.write(chunk)
                     done += len(chunk)
+        # empty file on Ahmad's side (0 bytes) = permanently broken app → mark DEAD (skip, no retry)
+        if done == 0:
+            raise RuntimeError("DEAD_APP: 0-byte file on server (broken app)")
         # integrity: truncated download?
         if total and done != total:
             raise RuntimeError(f"download truncated: got {done} of {total} bytes ({url[:60]})")
