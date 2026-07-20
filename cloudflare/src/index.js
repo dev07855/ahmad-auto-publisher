@@ -53,13 +53,23 @@ async function dispatchWorker(env, app, footer) {
 // ---------- المنطق الأساسي: الطابور ----------
 const isValidDL = (u) => typeof u === 'string' && u.startsWith('https://ahmad-up.com/download/link/');
 const isValidId = (v) => /^\d+$/.test(String(v));
-const SECTIONS = ['updates', 'games', 'design', 'modded'];
-const perKey = { updates: 'per_updates', games: 'per_games', design: 'per_design', modded: 'per_modded' };
-const SECTION_AR = { updates: '🔄 التحديثات', games: '🎮 الألعاب', design: '🎨 التصاميم', modded: '🧰 المعدلة' };
+
+// الأقسام أصبحت ديناميكية (جدول sections) — تُدار بالكامل من البوت
+async function loadSections(env, onlyEnabled = true) {
+  const rows = (await env.DB.prepare('SELECT key,name,path,quota,enabled,ord FROM sections ORDER BY ord ASC, rowid ASC').all()).results || [];
+  return onlyEnabled ? rows.filter(r => r.enabled) : rows;
+}
+async function sectionName(env, key) {
+  const r = await env.DB.prepare('SELECT name FROM sections WHERE key=?').bind(key).first();
+  return r ? r.name : key;
+}
+async function sectionExists(env, key) {
+  return !!(await env.DB.prepare('SELECT 1 FROM sections WHERE key=?').bind(key).first());
+}
 
 async function enqueueApps(env, section, apps) {
   // apps: [{id, name, version, download_url, rank}] بترتيب صفحة القسم (rank=0 أعلى)
-  if (!SECTIONS.includes(section)) section = 'updates';
+  if (!(await sectionExists(env, section))) section = 'updates';
   if (!Array.isArray(apps)) return 0;
   let added = 0;
   for (const a of apps) {
@@ -84,7 +94,7 @@ async function enqueueApps(env, section, apps) {
       .bind(a.id, a.name || '', ver, a.download_url, a.rank ?? 9999, nowSec(), 'pending', section).run();
     added++;
   }
-  if (added) await logEvent(env, 'info', `${SECTION_AR[section]}: أُضيف ${added}`);
+  if (added) await logEvent(env, 'info', `${await sectionName(env, section)}: أُضيف ${added}`);
   return added;
 }
 
@@ -118,16 +128,26 @@ async function tick(env) {
 
   await reclaimStuck(env);
   const footer = await getSetting(env, 'footer', '');
+  const mix = (await getSetting(env, 'mix_mode', '0')) === '1';
 
-  // مرّ على الأقسام بالترتيب؛ أطلق من أول قسم لم يبلغ حدّه وله تطبيق منتظر
-  for (const section of SECTIONS) {
-    const quota = safeCount(await getSetting(env, perKey[section], '5'), 5);
+  // رتّب الأقسام المؤهّلة (لها حصة متبقّية وتطبيق منتظر)
+  const secs = await loadSections(env, true);
+  const eligible = [];
+  for (const s of secs) {
+    const quota = safeCount(s.quota, 5);
     if (quota <= 0) continue;
-    if (await sectionInFlight(env, section) >= quota) continue;
+    const infl = await sectionInFlight(env, s.key);
+    if (infl >= quota) continue;
+    eligible.push({ key: s.key, name: s.name, quota, infl, ratio: infl / quota });
+  }
+  if (!eligible.length) return 'idle';
+  // الخلط: اختر الأقل نسبةً (يوزّع بالتناوب)؛ التجميع: بترتيب الأقسام
+  eligible.sort((a, b) => mix ? (a.ratio - b.ratio) : 0);
 
+  for (const s of eligible) {
     const next = await env.DB.prepare(
       `SELECT * FROM queue WHERE section=? AND status='pending'
-         ORDER BY rank ASC, added_at ASC LIMIT 1`).bind(section).first();
+         ORDER BY rank ASC, added_at ASC LIMIT 1`).bind(s.key).first();
     if (!next) continue;
 
     // مطالبة ذرّية (تمنع السباق): لا يُطلق إلا من ينجح في pending→processing
@@ -142,8 +162,8 @@ async function tick(env) {
       await logEvent(env, 'error', `فشل إطلاق العامل ${next.app_id}`);
       return 'dispatch_failed';
     }
-    await logEvent(env, 'info', `${SECTION_AR[section]}: ${next.name} (${next.app_id})`);
-    return `dispatched:${section}:${next.app_id}`;
+    await logEvent(env, 'info', `${s.name}: ${next.name} (${next.app_id})`);
+    return `dispatched:${s.key}:${next.app_id}`;
   }
   return 'idle';
 }
@@ -161,32 +181,32 @@ async function markPublished(env, app_id, name, version) {
 }
 
 // ---------- لوحة التحكم (أزرار البوت) ----------
-async function sectionCounts(env) {
-  const out = {};
-  for (const s of SECTIONS) {
-    out[s] = {
-      quota: safeCount(await getSetting(env, perKey[s], '5'), 5),
-      queued: (await env.DB.prepare("SELECT COUNT(*) c FROM queue WHERE section=? AND status='pending'").bind(s).first()).c,
-    };
-  }
-  return out;
-}
-
 async function panelMain(env) {
   const enabled = await getSetting(env, 'enabled', '1') === '1';
-  const sc = await sectionCounts(env);
-  const total = SECTIONS.reduce((a, s) => a + sc[s].quota, 0);
+  const mix = (await getSetting(env, 'mix_mode', '0')) === '1';
+  const daily = (await getSetting(env, 'daily_summary', '0')) === '1';
+  const secs = await loadSections(env, false);
+  let total = 0;
+  const lines = [];
+  for (const s of secs) {
+    const q = (await env.DB.prepare("SELECT COUNT(*) c FROM queue WHERE section=? AND status='pending'").bind(s.key).first()).c;
+    const on = s.enabled ? '' : ' ⛔️';
+    if (s.enabled) total += safeCount(s.quota, 5);
+    lines.push(`${s.name}: ${s.quota}/ساعة  (بالطابور ${q})${on}`);
+  }
   const todayCount = (await env.DB.prepare('SELECT COUNT(*) c FROM published WHERE published_day=?').bind(ksaDay()).first()).c;
-  const lines = SECTIONS.map(s => `${SECTION_AR[s]}: ${sc[s].quota}/ساعة  (بالطابور ${sc[s].queued})`);
   const text =
     `<b>🧠 لوحة تحكم النشر</b>\n\n` +
     `الحالة: ${enabled ? '🟢 يعمل' : '🔴 متوقف'}\n` +
+    `النمط: ${mix ? '🔀 مخلوط' : '🗂️ مجمّع'}\n` +
     `الإجمالي: ${total}/ساعة\n\n` +
     lines.join('\n') +
     `\n\nنُشر اليوم: ${todayCount}`;
   const kb = [
     [{ text: enabled ? '⏸️ إيقاف' : '▶️ تشغيل', callback_data: 'toggle' }],
-    [{ text: '🔢 عدد كل قسم', callback_data: 'secs' }, { text: '📋 الطابور', callback_data: 'queue' }],
+    [{ text: '🔢 الأقسام والأعداد', callback_data: 'secs' }, { text: '📋 الطابور', callback_data: 'queue' }],
+    [{ text: mix ? '🗂️ اجعله مجمّع' : '🔀 اجعله مخلوط', callback_data: 'mix' },
+     { text: daily ? '🔕 إيقاف الملخص اليومي' : '🔔 تفعيل الملخص اليومي', callback_data: 'daily' }],
     [{ text: '📊 التقرير', callback_data: 'report' }, { text: '🕐 إيقاف مؤقت', callback_data: 'pause' }],
     [{ text: '🚫 القائمة السوداء', callback_data: 'black' }, { text: '✍️ الفوتر', callback_data: 'footer' }],
     [{ text: '🔄 تحديث', callback_data: 'home' }],
@@ -213,11 +233,22 @@ async function handleCallback(env, cq) {
     const p = await panelMain(env); return edit(p.text, p.kb);
   }
 
+  if (data === 'mix') {
+    const cur = await getSetting(env, 'mix_mode', '0');
+    await setSetting(env, 'mix_mode', cur === '1' ? '0' : '1');
+    const p = await panelMain(env); return edit(p.text, p.kb);
+  }
+  if (data === 'daily') {
+    const cur = await getSetting(env, 'daily_summary', '0');
+    await setSetting(env, 'daily_summary', cur === '1' ? '0' : '1');
+    const p = await panelMain(env); return edit(p.text, p.kb);
+  }
+
   if (data === 'queue') {
     let body = '';
-    for (const s of SECTIONS) {
-      const rows = (await env.DB.prepare("SELECT name,version FROM queue WHERE section=? AND status='pending' ORDER BY rank ASC, added_at ASC LIMIT 4").bind(s).all()).results;
-      body += `\n<b>${SECTION_AR[s]}</b>\n` + (rows.length ? rows.map(r => `• ${H(r.name)} ${H(r.version || '')}`).join('\n') : '—') + '\n';
+    for (const s of await loadSections(env, false)) {
+      const rows = (await env.DB.prepare("SELECT name,version FROM queue WHERE section=? AND status='pending' ORDER BY rank ASC, added_at ASC LIMIT 4").bind(s.key).all()).results;
+      body += `\n<b>${s.name}</b>\n` + (rows.length ? rows.map(r => `• ${H(r.name)} ${H(r.version || '')}`).join('\n') : '—') + '\n';
     }
     return edit(`<b>📋 الطابور (أوائل كل قسم)</b>\n${body}`, [
       [{ text: '🗑️ تفريغ الطابور', callback_data: 'queue_clear' }], ...back]);
@@ -236,27 +267,53 @@ async function handleCallback(env, cq) {
     return edit(`<b>📊 التقرير</b>\n\nنُشر اليوم: ${today}\n\nآخر ما نُشر:\n${lastTxt}${errTxt}`, back);
   }
 
-  // اختيار القسم لتعديل عدده
+  // قائمة الأقسام (تعديل/تفعيل/حذف/إضافة)
   if (data === 'secs') {
-    const sc = await sectionCounts(env);
-    const kb = SECTIONS.map(s => [{ text: `${SECTION_AR[s]}: ${sc[s].quota}/ساعة`, callback_data: `sec_${s}` }]);
+    const secs = await loadSections(env, false);
+    const kb = secs.map(s => [{ text: `${s.enabled ? '' : '⛔️ '}${s.name}: ${s.quota}/ساعة`, callback_data: `sec_${s.key}` }]);
+    kb.push([{ text: '➕ أضف قسم', callback_data: 'addsec' }]);
     kb.push(...back);
-    return edit('<b>🔢 عدد كل قسم بالساعة</b>\nاختر قسماً لتغيير عدده:', kb);
+    return edit('<b>🔢 الأقسام والأعداد</b>\nاختر قسماً لتعديله، أو أضف قسماً جديداً:', kb);
   }
-  // شبكة أرقام لقسم محدد
-  if (/^sec_(updates|games|design|modded)$/.test(data)) {
-    const s = data.slice(4);
-    const opts = [0, 3, 5, 8, 10, 15];
-    const kb = [opts.slice(0, 3).map(n => ({ text: String(n), callback_data: `setsec_${s}_${n}` })),
-                opts.slice(3).map(n => ({ text: String(n), callback_data: `setsec_${s}_${n}` })),
-                [{ text: '⬅️ الأقسام', callback_data: 'secs' }]];
-    return edit(`<b>${SECTION_AR[s]}</b>\nاختر العدد بالساعة (0 = إيقاف هذا القسم):`, kb);
+  // إدارة قسم محدد
+  const secm = data.match(/^sec_([a-z0-9]+)$/);
+  if (secm && await sectionExists(env, secm[1])) {
+    const key = secm[1];
+    const s = await env.DB.prepare('SELECT * FROM sections WHERE key=?').bind(key).first();
+    const opts = [0, 3, 5, 8, 10, 15, 20];
+    const kb = [
+      opts.slice(0, 4).map(n => ({ text: String(n), callback_data: `setsec_${key}_${n}` })),
+      opts.slice(4).map(n => ({ text: String(n), callback_data: `setsec_${key}_${n}` })),
+      [{ text: s.enabled ? '⛔️ إيقاف القسم' : '✅ تفعيل القسم', callback_data: `toggsec_${key}` }],
+    ];
+    if (key !== 'updates') kb.push([{ text: '🗑️ حذف القسم', callback_data: `delsec_${key}` }]);
+    kb.push([{ text: '⬅️ الأقسام', callback_data: 'secs' }]);
+    return edit(`<b>${s.name}</b>\nالعدد بالساعة (0 = يوقف مؤقتاً):\nلعدد مخصّص أرسل: «عدد ${key} 12»`, kb);
   }
   // حفظ عدد قسم
-  const ms = data.match(/^setsec_(updates|games|design|modded)_(\d+)$/);
-  if (ms) {
-    await setSetting(env, perKey[ms[1]], String(safeCount(ms[2], 5)));
+  const ms = data.match(/^setsec_([a-z0-9]+)_(\d+)$/);
+  if (ms && await sectionExists(env, ms[1])) {
+    await env.DB.prepare('UPDATE sections SET quota=? WHERE key=?').bind(safeCount(ms[2], 5), ms[1]).run();
     const p = await panelMain(env); return edit(p.text, p.kb);
+  }
+  // تفعيل/إيقاف قسم
+  const tg2 = data.match(/^toggsec_([a-z0-9]+)$/);
+  if (tg2 && await sectionExists(env, tg2[1])) {
+    await env.DB.prepare('UPDATE sections SET enabled=1-enabled WHERE key=?').bind(tg2[1]).run();
+    const p = await panelMain(env); return edit(p.text, p.kb);
+  }
+  // حذف قسم (عدا التحديثات) + إزالة تطبيقاته المنتظرة
+  const dl = data.match(/^delsec_([a-z0-9]+)$/);
+  if (dl && dl[1] !== 'updates' && await sectionExists(env, dl[1])) {
+    await env.DB.prepare('DELETE FROM sections WHERE key=?').bind(dl[1]).run();
+    await env.DB.prepare("DELETE FROM queue WHERE section=? AND status='pending'").bind(dl[1]).run();
+    const p = await panelMain(env); return edit('🗑️ حُذف القسم.', p.kb);
+  }
+  // إضافة قسم — يعرض الأقسام المتاحة بموقع أحمد
+  if (data === 'addsec') {
+    const cats = [['6', 'ألعاب'], ['7', 'معدلة'], ['8', 'مدفوعة'], ['9', 'تصميم'], ['10', 'جلبريك'], ['11', 'مشاهدة'], ['13', 'إسلامية'], ['15', 'Fake GPS']];
+    const list = cats.map(([id, nm]) => `• ${nm} = رقم ${id}`).join('\n');
+    return edit(`<b>➕ أضف قسم</b>\n\nأرسل: «قسم &lt;رقم&gt; &lt;الاسم&gt; &lt;العدد&gt;»\nمثال: <code>قسم 11 مشاهدة 5</code>\n\nالأقسام المتاحة بموقع أحمد:\n${list}`, back);
   }
 
   if (data === 'pause') {
@@ -297,6 +354,45 @@ async function handleMessage(env, msg) {
     await env.DB.prepare('DELETE FROM queue WHERE app_id=?').bind(id).run();
     return tg(env, 'sendMessage', { chat_id: msg.chat.id, text: `🚫 حُظر التطبيق ${id}.` });
   }
+  // إضافة قسم: «قسم <رقم الكاتيجري> <الاسم> [العدد]»
+  let m = text.match(/^قسم\s+(\d+)\s+(.+?)(?:\s+(\d+))?$/);
+  if (m) {
+    const catId = m[1], name = m[2].trim(), quota = safeCount(m[3], 5);
+    const key = 'cat' + catId;
+    const ord = ((await env.DB.prepare('SELECT MAX(ord) mx FROM sections').first()).mx || 0) + 1;
+    await env.DB.prepare('INSERT OR REPLACE INTO sections(key,name,path,quota,enabled,ord) VALUES(?,?,?,?,1,?)')
+      .bind(key, `📦 ${name}`, `/category/${catId}`, quota, ord).run();
+    return tg(env, 'sendMessage', { chat_id: msg.chat.id, text: `✅ أُضيف قسم «${name}» (${quota}/ساعة). سيبدأ بالمسح التالي.` });
+  }
+  // عدد مخصّص لقسم: «عدد <key> <رقم>»
+  m = text.match(/^عدد\s+([a-z0-9]+)\s+(\d+)$/);
+  if (m && await sectionExists(env, m[1])) {
+    await env.DB.prepare('UPDATE sections SET quota=? WHERE key=?').bind(safeCount(m[2], 5), m[1]).run();
+    return tg(env, 'sendMessage', { chat_id: msg.chat.id, text: `✅ عدد ${m[1]} = ${safeCount(m[2], 5)}/ساعة.` });
+  }
+}
+
+// ملخص يومي للمالك (يُرسل مرة عند أول تِكّة بعد الساعة 21 بتوقيت السعودية)
+async function maybeDailySummary(env) {
+  if ((await getSetting(env, 'daily_summary', '0')) !== '1') return;
+  const t = nowSec() + KSA_OFFSET;
+  const hour = new Date(t * 1000).getUTCHours();
+  if (hour < 21) return;                          // بعد 9 مساءً السعودية
+  const today = ksaDay();
+  if ((await getSetting(env, 'daily_last', '')) === today) return; // مرة واحدة اليوم
+  await setSetting(env, 'daily_last', today);
+  const secs = await loadSections(env, false);
+  let lines = [];
+  for (const s of secs) {
+    const c = (await env.DB.prepare('SELECT COUNT(*) c FROM published WHERE section=? AND published_day=?').bind(s.key, today).first()).c;
+    lines.push(`${s.name}: ${c}`);
+  }
+  const total = (await env.DB.prepare('SELECT COUNT(*) c FROM published WHERE published_day=?').bind(today).first()).c;
+  const errs = (await env.DB.prepare("SELECT COUNT(*) c FROM log WHERE kind='error' AND ts >= ?").bind(nowSec() - 86400).first()).c;
+  await tg(env, 'sendMessage', {
+    chat_id: env.OWNER_ID, parse_mode: 'HTML',
+    text: `<b>📊 ملخص اليوم (${today})</b>\n\nنُشر إجمالاً: ${total}\n\n${lines.join('\n')}\n\n⚠️ أخطاء: ${errs}`,
+  });
 }
 
 // ---------- المُوجّه ----------
@@ -319,6 +415,13 @@ export default {
       if (u.callback_query) await handleCallback(env, u.callback_query);
       else if (u.message) await handleMessage(env, u.message);
       return new Response('ok');
+    }
+
+    // قائمة الأقسام المفعّلة (يقرأها الماسح ليعرف ماذا يمسح)
+    if (url.pathname === '/sections' && request.method === 'GET') {
+      if (request.headers.get('x-secret') !== env.ENQUEUE_SECRET) return new Response('forbidden', { status: 403 });
+      const secs = await loadSections(env, true);
+      return Response.json({ sections: secs.map(s => ({ key: s.key, path: s.path })) });
     }
 
     // إدخال تطبيقات من الماسح
@@ -364,6 +467,6 @@ export default {
   },
 
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(tick(env));
+    ctx.waitUntil((async () => { await tick(env); await maybeDailySummary(env); })());
   },
 };

@@ -9,13 +9,24 @@ Env: AHMAD_EMAIL, AHMAD_PASSWORD, BRAIN_URL, ENQUEUE_SECRET, SECTION_LIMIT(optio
 import os, sys, requests
 from ahmad import Ahmad, BASE
 
-# الأقسام الأربعة: (المفتاح, مسار الصفحة). التحديثات = صفحة مرتّبة بالأحدث؛ البقية صفحات أقسام.
-SECTIONS = [
+# الأقسام تُقرأ ديناميكياً من العقل (يديرها المالك من البوت)؛ وإن تعذّر، احتياطي ثابت.
+FALLBACK_SECTIONS = [
     ("updates", "/last-app-update"),
     ("games",   "/category/6"),
     ("design",  "/category/9"),
     ("modded",  "/category/7"),
 ]
+
+def get_sections():
+    try:
+        r = requests.get(os.environ["BRAIN_URL"].rstrip("/") + "/sections",
+                         headers={"x-secret": os.environ["ENQUEUE_SECRET"]}, timeout=30)
+        r.raise_for_status()
+        secs = [(s["key"], s["path"]) for s in r.json().get("sections", []) if s.get("path")]
+        return secs or FALLBACK_SECTIONS
+    except Exception as e:
+        print("get_sections failed, using fallback:", e)
+        return FALLBACK_SECTIONS
 
 def scan_section(a, path, limit):
     r = a.s.get(BASE + path, timeout=30)
@@ -40,7 +51,7 @@ def main():
         print("login failed:", msg); sys.exit(1)
     limit = int(os.environ.get("SECTION_LIMIT", "40"))
     total = 0
-    for section, path in SECTIONS:
+    for section, path in get_sections():
         try:
             apps = scan_section(a, path, limit)
         except Exception as e:
