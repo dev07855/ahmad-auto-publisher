@@ -344,9 +344,18 @@ export default {
       if (request.headers.get('x-secret') !== env.ENQUEUE_SECRET) return new Response('forbidden', { status: 403 });
       const body = await readJson();
       if (!body || !isValidId(body.app_id)) return new Response('bad request', { status: 400 });
-      await env.DB.prepare("UPDATE queue SET status='pending' WHERE app_id=?").bind(body.app_id).run();
-      await logEvent(env, 'error', `فشل ${body.app_id}: ${String(body.error || '').slice(0, 200)}`);
-      await tg(env, 'sendMessage', { chat_id: env.OWNER_ID, text: `⚠️ فشل نشر التطبيق ${H(body.app_id)}\n${H(String(body.error || '').slice(0, 200))}` });
+      // زد عدّاد المحاولات؛ بعد 3 فشل اعتبره تالفاً (status='failed') فلا يعطّل القسم
+      const row = await env.DB.prepare('SELECT attempts FROM queue WHERE app_id=?').bind(body.app_id).first();
+      const attempts = (row ? (row.attempts || 0) : 0) + 1;
+      if (attempts >= 3) {
+        await env.DB.prepare("UPDATE queue SET status='failed', attempts=? WHERE app_id=?").bind(attempts, body.app_id).run();
+      } else {
+        await env.DB.prepare("UPDATE queue SET status='pending', attempts=? WHERE app_id=?").bind(attempts, body.app_id).run();
+      }
+      await logEvent(env, 'error', `فشل ${body.app_id} (محاولة ${attempts}): ${String(body.error || '').slice(0, 160)}`);
+      if (attempts >= 3) {
+        await tg(env, 'sendMessage', { chat_id: env.OWNER_ID, text: `⚠️ تخطّي التطبيق ${H(body.app_id)} بعد 3 محاولات فاشلة\n${H(String(body.error || '').slice(0, 160))}` });
+      }
       return Response.json({ ok: true });
     }
 
