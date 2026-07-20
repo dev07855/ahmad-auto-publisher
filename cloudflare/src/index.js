@@ -496,6 +496,19 @@ export default {
       return Response.json({ sections: secs.map(s => ({ key: s.key, path: s.path })) });
     }
 
+    // جلسة بوت تلقرام المحفوظة (يعيد العامل استخدامها بدل تسجيل دخول كل مرة → لا FloodWait)
+    if (url.pathname === '/tgsession') {
+      if (request.headers.get('x-secret') !== env.ENQUEUE_SECRET) return new Response('forbidden', { status: 403 });
+      if (request.method === 'GET') {
+        return Response.json({ session: await getSetting(env, 'tg_session', '') });
+      }
+      if (request.method === 'POST') {
+        const b = await readJson();
+        if (b && typeof b.session === 'string') await setSetting(env, 'tg_session', b.session);
+        return Response.json({ ok: true });
+      }
+    }
+
     // إدخال تطبيقات من الماسح
     if (url.pathname === '/enqueue' && request.method === 'POST') {
       if (request.headers.get('x-secret') !== env.ENQUEUE_SECRET) return new Response('forbidden', { status: 403 });

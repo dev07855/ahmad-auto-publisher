@@ -8,19 +8,37 @@ NO user phone login. Photos/text go through the same bot session.
 Env / config keys:
   TG_API_ID, TG_API_HASH, TG_BOT_TOKEN, TG_CHANNEL  (channel @username or -100... id)
 """
-import os, asyncio
+import os, asyncio, requests
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.tl.types import DocumentAttributeFilename
 from telethon.errors import FloodWaitError
 
-def _client(cfg):
-    # in-memory session; bot login is instant and stateless
-    return TelegramClient(StringSession(), int(cfg["api_id"]), cfg["api_hash"])
+# جلسة البوت تُحفظ بالعقل وتُعاد للاستخدام — نتفادى تسجيل دخول جديد كل مرة (يمنع FloodWait)
+def _load_session(cfg):
+    try:
+        r = requests.get(cfg["brain"].rstrip("/") + "/tgsession",
+                         headers={"x-secret": cfg["enqueue"]}, timeout=15)
+        return r.json().get("session", "") or ""
+    except Exception:
+        return ""
+
+def _save_session(cfg, s):
+    try:
+        requests.post(cfg["brain"].rstrip("/") + "/tgsession",
+                      headers={"x-secret": cfg["enqueue"]}, json={"session": s}, timeout=15)
+    except Exception as e:
+        print("[tg] save session failed:", e)
 
 async def _publish_once(cfg, ipa_path, caption, thumb):
-    client = _client(cfg)
-    await client.start(bot_token=cfg["bot_token"])
+    saved = _load_session(cfg) if cfg.get("brain") else ""
+    client = TelegramClient(StringSession(saved), int(cfg["api_id"]), cfg["api_hash"])
+    await client.connect()
+    # سجّل دخول البوت فقط إن لم تكن الجلسة صالحة، ثم احفظها للمرات القادمة
+    if not await client.is_user_authorized():
+        await client.sign_in(bot_token=cfg["bot_token"])
+        if cfg.get("brain"):
+            _save_session(cfg, client.session.save())
     try:
         chan = cfg["channel"]
         fname = os.path.basename(ipa_path)
@@ -65,4 +83,6 @@ def cfg_from_env():
         "api_hash": os.environ["TG_API_HASH"],
         "bot_token": os.environ["TG_BOT_TOKEN"],
         "channel": os.environ["TG_CHANNEL"],
+        "brain": os.environ.get("BRAIN_URL", ""),
+        "enqueue": os.environ.get("ENQUEUE_SECRET", ""),
     }
