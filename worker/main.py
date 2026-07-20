@@ -99,6 +99,12 @@ def process(app_id, download_url=None, footer=None):
     info = a.app_info(app_id)
     print(f"[info] {info.get('name')} v{info.get('version')}")
 
+    # حد تلقرام للرفع عبر البوت ≈ 2 جيجا — تخطٍّ فوري قبل تحميل ملف ضخم بلا فائدة
+    TG_MAX_BYTES = 2_095_000_000
+    _sz = int(info.get("size") or 0)
+    if _sz and _sz > TG_MAX_BYTES:
+        raise RuntimeError(f"OVERSIZE: {round(_sz / 1073741824, 2)}GB أكبر من حد تلقرام 2GB")
+
     # resolve download link if not supplied (needs login)
     if not download_url:
         email = os.environ.get("AHMAD_EMAIL"); pw = os.environ.get("AHMAD_PASSWORD")

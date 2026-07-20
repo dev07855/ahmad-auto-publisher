@@ -646,19 +646,22 @@ export default {
       const errMsg = String(body.error || '');
       // تطبيق تالف (0 بايت) = تخطٍّ فوري بلا إعادة محاولة (لا يؤخّر الطابور)
       const isDead = errMsg.includes('DEAD_APP');
+      // أكبر من حد تلقرام (2 جيجا) = تخطٍّ فوري (بلا 3 محاولات) لكن مع تنبيه المالك مرة
+      const isOversize = errMsg.includes('OVERSIZE') || /file parts is invalid|entity too large|request entity too large|too big/i.test(errMsg);
       const row = await env.DB.prepare('SELECT attempts FROM queue WHERE app_id=?').bind(body.app_id).first();
       const attempts = (row ? (row.attempts || 0) : 0) + 1;
-      const giveUp = isDead || attempts >= 3;  // تالف فوراً، أو بعد 3 محاولات لأخطاء عابرة
+      const giveUp = isDead || isOversize || attempts >= 3;  // تالف/كبير = فوراً، وإلا بعد 3 محاولات
       await env.DB.prepare(`UPDATE queue SET status=?, attempts=? WHERE app_id=?`)
         .bind(giveUp ? 'failed' : 'pending', attempts, body.app_id).run();
-      await logEvent(env, 'error', `${isDead ? '☠️ تالف' : 'فشل'} ${body.app_id}${isDead ? '' : ` (محاولة ${attempts})`}: ${errMsg.slice(0, 140)}`);
-      if (attempts >= 3 && !isDead) {
+      await logEvent(env, 'error', `${isDead ? '☠️ تالف' : isOversize ? '📦 كبير' : 'فشل'} ${body.app_id}${(isDead || isOversize) ? '' : ` (محاولة ${attempts})`}: ${errMsg.slice(0, 140)}`);
+      if ((attempts >= 3 || isOversize) && !isDead) {
         // اسم التطبيق + سبب الفشل الواضح
         const q = await env.DB.prepare('SELECT name FROM queue WHERE app_id=?').bind(body.app_id).first();
         const nm = q && q.name ? q.name : body.app_id;
         // السبب دائماً بالعربي (لا يظهر خطأ إنجليزي خام للمالك أبداً)
         let why = 'خطأ غير متوقع أثناء المعالجة';
-        if (/wait of \d+ seconds/i.test(errMsg)) why = 'تلقرام حدّ الرفع مؤقتاً (سيُعاد لاحقاً)';
+        if (isOversize) why = 'التطبيق أكبر من حد تلقرام (٢ جيجا) — لا يمكن رفعه';
+        else if (/wait of \d+ seconds/i.test(errMsg)) why = 'تلقرام حدّ الرفع مؤقتاً (سيُعاد لاحقاً)';
         else if (/two different IP|authorization key/i.test(errMsg)) why = 'الجلسة استُخدمت من مكانين معاً (سيُعاد لاحقاً)';
         else if (/not an IPA/i.test(errMsg)) why = 'الملف المحمّل ليس تطبيقاً سليماً';
         else if (/truncated/i.test(errMsg)) why = 'التحميل انقطع قبل اكتماله';
