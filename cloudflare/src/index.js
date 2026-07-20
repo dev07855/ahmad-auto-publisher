@@ -326,10 +326,36 @@ async function handleCallback(env, cq) {
     if (subs == null) {
       return edit('<b>👥 المشتركون</b>\n\n⚠️ تعذّر جلب العدد.\nتأكد أن البوت مشرف داخل القناة.', back);
     }
-    const prev = parseInt(await getSetting(env, 'subs_last', '0'), 10) || 0;
-    const arrow = !prev ? '' : subs > prev ? `\n\nالنمو منذ آخر قياس: +${subs - prev} ▲`
-      : subs < prev ? `\n\nالتغيّر منذ آخر قياس: ${subs - prev} ▼` : '\n\n(بلا تغيّر منذ آخر قياس)';
-    return edit(`<b>👥 مشتركو القناة</b>\n\nالعدد الآن: <b>${subs}</b>${arrow}`, back);
+    const hist = await recordSubsSnapshot(env, subs);   // سجّل اليوم أيضاً عند الضغط
+    const last7 = hist.slice(-7);
+    let body = `<b>👥 مشتركو القناة</b>\n\nالعدد الآن: <b>${subs}</b>`;
+    if (last7.length >= 2) {
+      const AR = ['الأحد', 'الإثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت'];
+      const counts = last7.map(e => e.c);
+      const mx = Math.max(...counts), mn = Math.min(...counts), span = Math.max(1, mx - mn);
+      let chart = '', prevC = null;
+      for (const e of last7) {
+        const filled = 1 + Math.round(((e.c - mn) / span) * 6);   // 1..7 مربّعات
+        const bar = '▓'.repeat(filled) + '░'.repeat(7 - filled);
+        const dow = AR[new Date(e.d + 'T12:00:00Z').getUTCDay()];
+        const delta = prevC == null ? '' : e.c > prevC ? ` +${e.c - prevC}` : e.c < prevC ? ` ${e.c - prevC}` : ' =';
+        chart += `${dow} ${bar} ${e.c}${delta}\n`;
+        prevC = e.c;
+      }
+      const weekGrow = counts[counts.length - 1] - counts[0];
+      body += `\n\n<b>آخر ${last7.length} أيام:</b>\n<pre>${chart}</pre>`;
+      body += `نمو الفترة: ${weekGrow >= 0 ? '+' : ''}${weekGrow} ${weekGrow > 0 ? '▲' : weekGrow < 0 ? '▼' : ''}`;
+      // 🔮 توقّع الوصول للمعلم القادم (كل 500) بمعدّل النمو الحالي
+      const avg = weekGrow / (last7.length - 1);
+      if (avg > 0.5) {
+        const next = (Math.floor(subs / 500) + 1) * 500;
+        const need = Math.ceil((next - subs) / avg);
+        body += `\n\n🔮 بهذا المعدل توصل ${next} خلال ~${need} يوم`;
+      }
+    } else {
+      body += `\n\n📈 بدأ التتبّع من اليوم — بتشوف النمو والرسم والتوقّع بعد يوم أو يومين.`;
+    }
+    return edit(body, [[{ text: '🔄 تحديث', callback_data: 'subs' }], ...back]);
   }
 
   if (data === 'report') {
@@ -538,6 +564,46 @@ async function getSubscriberCount(env) {
   } catch { return null; }
 }
 
+// سجّل عدد اليوم بالتاريخ (JSON بالإعدادات) — إدخال واحد/يوم، نحتفظ بآخر 30 يوماً
+async function recordSubsSnapshot(env, count) {
+  const today = ksaDay();
+  let hist = [];
+  try { hist = JSON.parse(await getSetting(env, 'subs_history', '[]')) || []; } catch { hist = []; }
+  hist = hist.filter(e => e && e.d !== today);
+  hist.push({ d: today, c: count });
+  hist = hist.slice(-30);
+  await setSetting(env, 'subs_history', JSON.stringify(hist));
+  return hist;
+}
+
+// مراقبة يومية للمشتركين: تسجيل + تنبيه المعالم (كل 500) + تنبيه الهبوط (مرة/يوم)
+async function maybeSubsWatch(env) {
+  const today = ksaDay();
+  if ((await getSetting(env, 'subs_watch_day', '')) === today) return;   // مرة واحدة باليوم
+  const count = await getSubscriberCount(env);
+  if (count == null) return;                                             // تعذّر — نعيد بكرة
+  await setSetting(env, 'subs_watch_day', today);
+  const hist = await recordSubsSnapshot(env, count);
+  const prevEntry = hist.filter(e => e.d !== today).slice(-1)[0];
+  const prev = prevEntry ? prevEntry.c : 0;
+  // 📉 تنبيه هبوط (نقص 10+ مشترك بيوم)
+  if (prev && (prev - count) >= 10) {
+    await tg(env, 'sendMessage', { chat_id: env.OWNER_ID, parse_mode: 'HTML',
+      text: `📉 <b>تنبيه هبوط</b>\n\nنقص ${prev - count} مشترك اليوم (من ${prev} إلى ${count}).\nراجع آخر منشوراتك — قد يكون فيها ما أزعج المتابعين.` });
+  }
+  // 🎉 تنبيه المعالم (كل 500)
+  const step = 500;
+  const lastM = parseInt(await getSetting(env, 'subs_milestone', '0'), 10) || 0;
+  const crossed = Math.floor(count / step) * step;
+  if (lastM === 0) {
+    await setSetting(env, 'subs_milestone', crossed);                   // خط أساس (بلا احتفال رجعي)
+  } else if (crossed > lastM) {
+    await setSetting(env, 'subs_milestone', crossed);
+    await tg(env, 'sendMessage', { chat_id: env.OWNER_ID, parse_mode: 'HTML',
+      text: `🎉 <b>مبروك!</b>\n\nقناتك وصلت <b>${crossed}</b> مشترك 🚀\nاستمر — نموّك ممتاز!` });
+  }
+}
+
 // تنبيه «النشر متوقف»: نظام يعمل + طابور فيه منتظرون + ما نُشر شي من 6 ساعات (مرة واحدة حتى يعود)
 async function maybeHealthCheck(env) {
   if (await getSetting(env, 'enabled', '1') !== '1') return;                 // متوقف يدوياً = طبيعي
@@ -702,6 +768,7 @@ export default {
     ctx.waitUntil((async () => {
       await tick(env);
       await maybeHealthCheck(env);
+      await maybeSubsWatch(env);
       await maybeDailySummary(env);
       await maybeWeeklySummary(env);
     })());
