@@ -233,7 +233,8 @@ async function panelMain(env) {
     [{ text: '🔢 الأقسام والأعداد', callback_data: 'secs' }, { text: '📋 الطابور', callback_data: 'queue' }],
     [{ text: mix ? '🗂️ اجعله مجمّع' : '🔀 اجعله مخلوط', callback_data: 'mix' },
      { text: daily ? '🔕 إيقاف الملخص اليومي' : '🔔 تفعيل الملخص اليومي', callback_data: 'daily' }],
-    [{ text: '📊 التقرير', callback_data: 'report' }, { text: '🕐 إيقاف مؤقت', callback_data: 'pause' }],
+    [{ text: '👥 المشتركون', callback_data: 'subs' }, { text: '📊 التقرير', callback_data: 'report' }],
+    [{ text: '🕐 إيقاف مؤقت', callback_data: 'pause' }],
     [{ text: '🚫 القائمة السوداء', callback_data: 'black' }, { text: '✍️ الفوتر', callback_data: 'footer' }],
     [{ text: '🔄 تحديث', callback_data: 'home' }],
   ];
@@ -318,6 +319,17 @@ async function handleCallback(env, cq) {
   if (data === 'queue_clear') {
     await env.DB.prepare("DELETE FROM queue WHERE status='pending'").run();
     return edit('✅ فُرّغ الطابور.', back);
+  }
+
+  if (data === 'subs') {
+    const subs = await getSubscriberCount(env);
+    if (subs == null) {
+      return edit('<b>👥 المشتركون</b>\n\n⚠️ تعذّر جلب العدد.\nتأكد أن البوت مشرف داخل القناة.', back);
+    }
+    const prev = parseInt(await getSetting(env, 'subs_last', '0'), 10) || 0;
+    const arrow = !prev ? '' : subs > prev ? `\n\nالنمو منذ آخر قياس: +${subs - prev} ▲`
+      : subs < prev ? `\n\nالتغيّر منذ آخر قياس: ${subs - prev} ▼` : '\n\n(بلا تغيّر منذ آخر قياس)';
+    return edit(`<b>👥 مشتركو القناة</b>\n\nالعدد الآن: <b>${subs}</b>${arrow}`, back);
   }
 
   if (data === 'report') {
