@@ -146,9 +146,12 @@ def process(app_id, download_url=None, footer=None):
                 img = bg
             else:
                 img = img.convert("RGB")
-            # ثبّت 320×320 (تلقرام يعرضها أوضح؛ thumbnail وحده لا يكبّر الأيقونات الصغيرة)
-            img = img.resize((320, 320), Image.LANCZOS)
-            img.save(thumb, "JPEG", quality=90)
+            # صورة كبيرة واضحة تُنشر بالقناة (زي ما تظهر عند أحمد)
+            photo = os.path.join(work, "photo.jpg")
+            img.resize((640, 640), Image.LANCZOS).save(photo, "JPEG", quality=92)
+            # وأيقونة صغيرة تُرفق بالملف نفسه
+            img.resize((320, 320), Image.LANCZOS).save(thumb, "JPEG", quality=90)
+            info["_photo"] = photo
         except Exception as e:
             print("[thumb] skip:", e)
             thumb = None

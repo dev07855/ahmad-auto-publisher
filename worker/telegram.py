@@ -48,11 +48,24 @@ async def _publish_once(cfg, ipa_path, caption, thumb):
         # directly (not a pre-uploaded handle) makes Telethon reliably attach the thumb,
         # and it still posts as a SINGLE atomic message that only appears AFTER the upload
         # finishes — so there is no gap and the icon always shows.
-        await client.send_file(
-            chan, ipa_path, caption=caption, parse_mode="html",
-            force_document=True, thumb=thumb, part_size_kb=512,
-            attributes=[DocumentAttributeFilename(fname)],
-        )
+        photo = cfg.get("photo")
+        if photo and os.path.exists(photo):
+            # 1) ارفع الملف الكبير أولاً بصمت (لا شيء يُنشر بعد) — يضمن عدم وجود فجوة
+            handle = await client.upload_file(ipa_path, part_size_kb=512)
+            # 2) انشر صورة التطبيق الواضحة + الوصف
+            await client.send_file(chan, photo, caption=caption, parse_mode="html")
+            # 3) ثم الملف مباشرة (فوري لأنه مرفوع)
+            await client.send_file(
+                chan, handle, force_document=True, thumb=thumb,
+                attributes=[DocumentAttributeFilename(fname)],
+            )
+        else:
+            # لا صورة متاحة: رسالة واحدة (الملف + الوصف)
+            await client.send_file(
+                chan, ipa_path, caption=caption, parse_mode="html",
+                force_document=True, thumb=thumb, part_size_kb=512,
+                attributes=[DocumentAttributeFilename(fname)],
+            )
     finally:
         await client.disconnect()
 
