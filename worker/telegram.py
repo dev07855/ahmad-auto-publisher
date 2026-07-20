@@ -17,35 +17,28 @@ def _client(cfg):
     # in-memory session; bot login is instant and stateless
     return TelegramClient(StringSession(), int(cfg["api_id"]), cfg["api_hash"])
 
-async def _publish(cfg, ipa_path, caption, photos):
+async def _publish(cfg, ipa_path, caption, thumb):
     client = _client(cfg)
     await client.start(bot_token=cfg["bot_token"])
     try:
         chan = cfg["channel"]
         fname = os.path.basename(ipa_path)
 
-        # 1) PRE-UPLOAD the big IPA to Telegram FIRST (the slow part) — nothing is
-        #    posted to the channel yet. This guarantees the file is ready before any text.
+        # ONE cohesive premium message: the IPA document carries the app icon as its
+        # thumbnail AND the formatted features as its caption. Uploading (the slow part)
+        # finishes before the single message is posted, so nothing shows without its file.
         handle = await client.upload_file(ipa_path, part_size_kb=512)
-
-        # 2) now that the file is ready, post description (+icon) THEN the file
-        #    back-to-back — no gap where the description shows without its app.
-        if photos:
-            await client.send_file(chan, photos, caption=caption, parse_mode="html")
-            file_caption = None
-        else:
-            file_caption = caption
         await client.send_file(
-            chan, handle, caption=file_caption, parse_mode="html",
-            force_document=True,
+            chan, handle, caption=caption, parse_mode="html",
+            force_document=True, thumb=thumb,
             attributes=[DocumentAttributeFilename(fname)],
         )
     finally:
         await client.disconnect()
 
-def publish(cfg, ipa_path, caption, photos=None):
-    """cfg = {api_id, api_hash, bot_token, channel}. photos = list of local paths/urls."""
-    asyncio.run(_publish(cfg, ipa_path, caption, photos or []))
+def publish(cfg, ipa_path, caption, thumb=None):
+    """cfg = {api_id, api_hash, bot_token, channel}. thumb = local jpg path for the doc icon."""
+    asyncio.run(_publish(cfg, ipa_path, caption, thumb))
 
 def cfg_from_env():
     return {

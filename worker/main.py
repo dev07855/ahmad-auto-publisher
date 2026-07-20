@@ -18,25 +18,54 @@ import os, sys, re, html, tempfile
 from ahmad import Ahmad, clean_name
 import inject as injector
 
+def _clean_desc(desc):
+    # strip any ahmad references / links
+    desc = re.sub(r'https?://\S*ahmad\S*', '', desc, flags=re.I)
+    desc = re.sub(r'(?i)ahmad[\s\-_]*up|ahmad\s*dev|@\w*ahmad\w*', '', desc)
+    return desc
+
+
+def _format_features(desc):
+    """Turn Ahmad's raw '- feature .' lines into a tidy premium list with a bullet each."""
+    lines = []
+    for raw in desc.splitlines():
+        t = raw.strip()
+        if not t:
+            continue
+        # drop leading list markers (-, •, *, ▪) and trailing lone dots/spaces
+        t = re.sub(r'^[\-\*•▪▫•·]+\s*', '', t)
+        t = re.sub(r'\s*\.\s*$', '', t).strip()
+        if not t:
+            continue
+        lines.append(t)
+    return lines
+
+
 def build_caption(info):
+    """Premium one-message caption: title • version/size, then tidy feature bullets, then footer.
+    Used as the CAPTION of the IPA document (icon shown as its thumbnail)."""
     name = info.get("name", "").strip()
     ver = info.get("version", "").strip()
     size_mb = round(int(info.get("size", 0)) / 1048576, 1) if str(info.get("size", "")).isdigit() else None
-    desc = (info.get("description") or "").strip()
-    # rule-based cleaning: strip any ahmad references / links from the description
-    desc = re.sub(r'https?://\S*ahmad\S*', '', desc, flags=re.I)
-    desc = re.sub(r'(?i)ahmad[\s\-_]*up|ahmad\s*dev|@\w*ahmad\w*', '', desc)
-    desc = re.sub(r'\n{3,}', '\n\n', desc).strip()
+    desc = _clean_desc((info.get("description") or "").strip())
     footer = os.environ.get("CHANNEL_FOOTER", "").strip()
+    feats = _format_features(desc)
 
-    parts = [f"<b>{html.escape(name)}</b>"]
+    parts = [f"📲 <b>{html.escape(name)}</b>"]
     meta = []
-    if ver: meta.append(f"الإصدار: {html.escape(ver)}")
-    if size_mb: meta.append(f"الحجم: {size_mb} MB")
-    if meta: parts.append(" • ".join(meta))
-    if desc: parts.append("")
-    if desc: parts.append(html.escape(desc)[:900])
-    if footer: parts += ["", footer]
+    if ver: meta.append(f"الإصدار {html.escape(ver)}")
+    if size_mb: meta.append(f"{size_mb} MB")
+    if meta: parts.append("🔖 " + " • ".join(meta))
+    if feats:
+        parts.append("")
+        parts.append("✨ <b>المميزات:</b>")
+        body = "\n".join(f"▫️ {html.escape(f)}" for f in feats)
+        # Telegram caption hard-limit is 1024 chars; keep room for header/footer
+        if len(body) > 750:
+            body = body[:750].rsplit("\n", 1)[0]
+        parts.append(body)
+    if footer:
+        parts += ["", footer]
     return "\n".join(parts)
 
 def process(app_id, download_url=None):
@@ -71,25 +100,31 @@ def process(app_id, download_url=None):
     print(f"[inject] -> {os.path.basename(out)}")
 
     caption = build_caption(info)
-    # download the icon locally (Telethon/MTProto needs real bytes, not a URL)
-    photos = []
+    # download the icon and turn it into a small JPEG thumbnail for the document
+    # (shown ON the file itself, like a premium post — one cohesive message).
+    thumb = None
     if info.get("icon"):
         try:
             icon_path = os.path.join(work, "icon.png")
             a.download(info["icon"], icon_path)
-            photos = [icon_path]
+            thumb = os.path.join(work, "thumb.jpg")
+            from PIL import Image
+            img = Image.open(icon_path).convert("RGB")
+            img.thumbnail((320, 320))
+            img.save(thumb, "JPEG", quality=85)
         except Exception as e:
-            print("[icon] skip:", e)
-    return out, caption, photos, info
+            print("[thumb] skip:", e)
+            thumb = None
+    return out, caption, thumb, info
 
 if __name__ == "__main__":
     app_id = sys.argv[1]
     dl = sys.argv[2] if len(sys.argv) > 2 else None
-    out, caption, photos, info = process(app_id, dl)
+    out, caption, thumb, info = process(app_id, dl)
     print("=== caption ===")
     print(caption)
     print("=== file ===", out)
     if os.environ.get("PUBLISH") == "1":
         import telegram
-        telegram.publish(telegram.cfg_from_env(), out, caption, photos)
+        telegram.publish(telegram.cfg_from_env(), out, caption, thumb)
         print("[publish] done")
