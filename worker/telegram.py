@@ -48,21 +48,11 @@ async def _publish_once(cfg, ipa_path, caption, thumb):
         # directly (not a pre-uploaded handle) makes Telethon reliably attach the thumb,
         # and it still posts as a SINGLE atomic message that only appears AFTER the upload
         # finishes — so there is no gap and the icon always shows.
-        # تشخيص: هل ملف الأيقونة موجود فعلاً؟
-        import os as _os
-        thumb_ok = bool(thumb) and _os.path.exists(thumb)
-        print(f"[thumb] path={thumb} exists={thumb_ok} size={_os.path.getsize(thumb) if thumb_ok else 'NA'}")
-        msg = await client.send_file(
+        await client.send_file(
             chan, ipa_path, caption=caption, parse_mode="html",
             force_document=True, thumb=thumb, part_size_kb=512,
             attributes=[DocumentAttributeFilename(fname)],
         )
-        # تشخيص: هل تلقرام أرفق الأيقونة فعلاً بالملف المُرسل؟
-        try:
-            doc = getattr(msg, "document", None)
-            print(f"[thumb] sent-doc thumbs={getattr(doc,'thumbs',None)} mime={getattr(doc,'mime_type',None)}")
-        except Exception as _e:
-            print("[thumb] inspect failed:", _e)
     finally:
         await client.disconnect()
 

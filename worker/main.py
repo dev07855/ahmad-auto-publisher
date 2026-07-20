@@ -137,9 +137,17 @@ def process(app_id, download_url=None, footer=None):
             a.download(info["icon"], icon_path)
             thumb = os.path.join(work, "thumb.jpg")
             from PIL import Image
-            img = Image.open(icon_path).convert("RGB")
+            img = Image.open(icon_path)
+            # الأيقونات الشفافة: ركّبها على خلفية بيضاء (بدلاً من أسود عند التحويل لـJPEG)
+            if img.mode in ("RGBA", "LA", "P"):
+                img = img.convert("RGBA")
+                bg = Image.new("RGB", img.size, (255, 255, 255))
+                bg.paste(img, mask=img.split()[-1])
+                img = bg
+            else:
+                img = img.convert("RGB")
             img.thumbnail((320, 320))
-            img.save(thumb, "JPEG", quality=85)
+            img.save(thumb, "JPEG", quality=88)
         except Exception as e:
             print("[thumb] skip:", e)
             thumb = None
