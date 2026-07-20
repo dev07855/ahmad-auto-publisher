@@ -54,6 +54,18 @@ async function dispatchWorker(env, app, footer) {
 const isValidDL = (u) => typeof u === 'string' && u.startsWith('https://ahmad-up.com/download/link/');
 const isValidId = (v) => /^\d+$/.test(String(v));
 
+// فهرس أقسام موقع أحمد المتاحة للإضافة (name يظهر بالبوت والقناة)
+const CATALOG = [
+  { id: '6', name: '🎮 الألعاب' },
+  { id: '7', name: '🧰 المعدلة' },
+  { id: '8', name: '💰 المدفوعة' },
+  { id: '9', name: '🎨 التصاميم' },
+  { id: '10', name: '⚙️ الجلبريك' },
+  { id: '11', name: '📺 المشاهدة' },
+  { id: '13', name: '🕌 الإسلامية' },
+  { id: '15', name: '🌍 Fake GPS' },
+];
+
 // الأقسام أصبحت ديناميكية (جدول sections) — تُدار بالكامل من البوت
 async function loadSections(env, onlyEnabled = true) {
   const rows = (await env.DB.prepare('SELECT key,name,path,quota,enabled,ord FROM sections ORDER BY ord ASC, rowid ASC').all()).results || [];
@@ -309,11 +321,25 @@ async function handleCallback(env, cq) {
     await env.DB.prepare("DELETE FROM queue WHERE section=? AND status='pending'").bind(dl[1]).run();
     const p = await panelMain(env); return edit('🗑️ حُذف القسم.', p.kb);
   }
-  // إضافة قسم — يعرض الأقسام المتاحة بموقع أحمد
+  // إضافة قسم — أزرار جاهزة للأقسام المتاحة (اضغط بس، بلا كتابة)
   if (data === 'addsec') {
-    const cats = [['6', 'ألعاب'], ['7', 'معدلة'], ['8', 'مدفوعة'], ['9', 'تصميم'], ['10', 'جلبريك'], ['11', 'مشاهدة'], ['13', 'إسلامية'], ['15', 'Fake GPS']];
-    const list = cats.map(([id, nm]) => `• ${nm} = رقم ${id}`).join('\n');
-    return edit(`<b>➕ أضف قسم</b>\n\nأرسل: «قسم &lt;رقم&gt; &lt;الاسم&gt; &lt;العدد&gt;»\nمثال: <code>قسم 11 مشاهدة 5</code>\n\nالأقسام المتاحة بموقع أحمد:\n${list}`, back);
+    const existingPaths = new Set((await loadSections(env, false)).map(s => s.path));
+    const avail = CATALOG.filter(c => !existingPaths.has(`/category/${c.id}`));
+    if (!avail.length) return edit('<b>➕ أضف قسم</b>\n\nكل الأقسام مُضافة بالفعل ✅', [[{ text: '⬅️ الأقسام', callback_data: 'secs' }]]);
+    const kb = avail.map(c => [{ text: `${c.name}`, callback_data: `addcat_${c.id}` }]);
+    kb.push([{ text: '⬅️ الأقسام', callback_data: 'secs' }]);
+    return edit('<b>➕ أضف قسم</b>\nاضغط القسم اللي تبي تضيفه (٥/ساعة افتراضياً، غيّره بعدها):', kb);
+  }
+  // تنفيذ الإضافة بضغطة
+  const ac = data.match(/^addcat_(\d+)$/);
+  if (ac) {
+    const c = CATALOG.find(x => x.id === ac[1]);
+    if (c) {
+      const ord = ((await env.DB.prepare('SELECT MAX(ord) mx FROM sections').first()).mx || 0) + 1;
+      await env.DB.prepare('INSERT OR REPLACE INTO sections(key,name,path,quota,enabled,ord) VALUES(?,?,?,?,1,?)')
+        .bind('cat' + c.id, c.name, `/category/${c.id}`, 5, ord).run();
+    }
+    const p = await panelMain(env); return edit('✅ أُضيف القسم (سيبدأ بالمسح التالي).', p.kb);
   }
 
   if (data === 'pause') {
