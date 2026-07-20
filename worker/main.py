@@ -34,8 +34,8 @@ def _format_features(desc):
         t = raw.strip()
         if not t:
             continue
-        # drop leading list markers (-, •, *, ▪) and trailing lone dots/spaces
-        t = re.sub(r'^[\-\*•▪▫•·]+\s*', '', t)
+        # drop leading list markers (-, •, *, وكل أنواع المربّعات) and trailing lone dots/spaces
+        t = re.sub(r'^[\-\*•▪▫◾◽■□●○·►▶‣∙]+\s*', '', t)
         t = re.sub(r'\s*\.\s*$', '', t).strip()
         if not t:
             continue
@@ -75,10 +75,10 @@ def build_caption(info, footer=None):
 
     body_lines, used = [], 0
     for f in feats:
-        line = f"▫️ {f}"                       # measure on RAW text (visible length)
+        line = f"✦ {f}"                        # measure on RAW text (visible length)
         if used + len(line) + 1 > budget:
             break
-        body_lines.append(f"▫️ {html.escape(f)}")  # escape only what we keep
+        body_lines.append(f"✦ {html.escape(f)}")  # escape only what we keep
         used += len(line) + 1
 
     parts = list(header)
