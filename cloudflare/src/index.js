@@ -366,8 +366,13 @@ async function handleCallback(env, cq) {
 
 async function handleMessage(env, msg) {
   const text = (msg.text || '').trim();
-  if (text === '/start' || text === '/panel' || text === 'لوحة') {
+  if (text === '/start' || text === '/panel' || text === 'لوحة' || text === '🧠 لوحتي') {
     const p = await panelMain(env);
+    // زر ثابت «🧠 لوحتي» يظهر جنب مربع الكتابة — اضغطه أي وقت بدل ما تكتب /start
+    await tg(env, 'sendMessage', {
+      chat_id: msg.chat.id, text: 'اضغط «🧠 لوحتي» أي وقت لفتح اللوحة.',
+      reply_markup: { keyboard: [[{ text: '🧠 لوحتي' }]], resize_keyboard: true, is_persistent: true },
+    });
     return tg(env, 'sendMessage', { chat_id: msg.chat.id, text: p.text, parse_mode: 'HTML', reply_markup: { inline_keyboard: p.kb } });
   }
   if (text.startsWith('فوتر:')) {
