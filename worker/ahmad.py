@@ -18,23 +18,30 @@ class Ahmad:
         self.s.headers.update({"User-Agent": UA, "Accept-Language": "ar,en;q=0.9"})
 
     # ---- auth ----
-    def _csrf(self):
+    def _hidden_fields(self):
+        """Grab ALL hidden inputs from the sign-in form (the site ships two dynamic
+        ones: `token` = CSRF, and `login` = a per-page signed value). Both are required."""
         r = self.s.get(f"{BASE}/sign-in", timeout=30)
         r.raise_for_status()
-        m = re.search(r'name="token"[^>]*value="([^"]+)"', r.text) or \
-            re.search(r'value="([^"]+)"[^>]*name="token"', r.text) or \
-            re.search(r'id="token"[^>]*value="([^"]+)"', r.text)
-        return m.group(1) if m else ""
+        fields = {}
+        for m in re.finditer(r'<input[^>]*type="hidden"[^>]*>', r.text):
+            tag = m.group(0)
+            nm = re.search(r'name="([^"]+)"', tag)
+            vl = re.search(r'value="([^"]*)"', tag)
+            if nm:
+                fields[nm.group(1)] = vl.group(1) if vl else ""
+        return fields
 
     def login(self, email, password):
-        token = self._csrf()
-        data = {"email": email, "password": password, "token": token, "login": "1"}
+        data = self._hidden_fields()          # includes token + login (correct values)
+        data["email"] = email
+        data["password"] = password
         r = self.s.post(f"{BASE}/users/login-member", data=data, timeout=30,
                         headers={"X-Requested-With": "XMLHttpRequest", "Referer": f"{BASE}/sign-in"})
         # verify by loading a gated page and checking we are NOT bounced to sign-in
         chk = self.s.get(f"{BASE}/last-app-update", timeout=30)
         ok = "download/link" in chk.text
-        return ok, (r.text or "")[:200]
+        return ok, re.sub(r'<[^>]+>', ' ', (r.text or ""))[:200].strip()
 
     # ---- listing ----
     def list_recent(self, limit=None):
