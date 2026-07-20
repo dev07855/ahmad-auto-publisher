@@ -1,0 +1,31 @@
+name: publish-app
+on:
+  repository_dispatch:
+    types: [publish_app]
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      - run: pip install -r worker/requirements.txt
+      - name: write dylib from secret
+        run: printf '%s' "${{ secrets.DYLIB_B64 }}" | base64 -d > worker/fixipa.dylib
+      - name: process & publish
+        working-directory: worker
+        env:
+          AHMAD_EMAIL: ${{ secrets.AHMAD_EMAIL }}
+          AHMAD_PASSWORD: ${{ secrets.AHMAD_PASSWORD }}
+          DYLIB_PATH: fixipa.dylib
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHANNEL: ${{ secrets.TG_CHANNEL }}
+          CHANNEL_FOOTER: ${{ secrets.CHANNEL_FOOTER }}
+          BRAIN_URL: ${{ secrets.BRAIN_URL }}
+          ENQUEUE_SECRET: ${{ secrets.ENQUEUE_SECRET }}
+          PUBLISH: '1'
+          APP_ID: ${{ github.event.client_payload.app_id }}
+          DL: ${{ github.event.client_payload.download_url }}
+        run: python run_publish.py

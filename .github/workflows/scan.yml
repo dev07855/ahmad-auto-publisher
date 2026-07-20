@@ -1,0 +1,20 @@
+name: scan-updates
+on:
+  schedule: [{ cron: '*/10 * * * *' }]
+  workflow_dispatch:
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      - run: pip install requests
+      - working-directory: worker
+        env:
+          AHMAD_EMAIL: ${{ secrets.AHMAD_EMAIL }}
+          AHMAD_PASSWORD: ${{ secrets.AHMAD_PASSWORD }}
+          BRAIN_URL: ${{ secrets.BRAIN_URL }}
+          ENQUEUE_SECRET: ${{ secrets.ENQUEUE_SECRET }}
+          SCAN_LIMIT: '60'
+        run: python scan.py

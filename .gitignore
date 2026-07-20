@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+*.ipa
+*.dylib
+link_notes.txt
+.DS_Store

@@ -1,0 +1,11 @@
+name = "ahmad-auto-publisher"
+main = "src/index.js"
+compatibility_date = "2024-11-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "ahmad_publisher"
+database_id = "2451d5b9-86ff-40a8-a697-9fe68bde2519"
+
+[triggers]
+crons = ["*/3 * * * *"]   # كل 3 دقائق: يفحص الطابور؛ الحد الفعلي per_hour (افتراضي 10)
