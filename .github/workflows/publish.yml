@@ -4,6 +4,10 @@ on:
     types: [publish_app]
 permissions:
   contents: read
+# نشر واحد فقط في كل وقت — يمنع استخدام جلسة البوت من عنوانين معاً (تلقرام يلغيها)
+concurrency:
+  group: publish-serial
+  cancel-in-progress: false
 jobs:
   publish:
     runs-on: ubuntu-latest

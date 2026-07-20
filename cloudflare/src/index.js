@@ -547,6 +547,7 @@ export default {
         const nm = q && q.name ? q.name : body.app_id;
         let why = errMsg.slice(0, 180);
         if (/wait of \d+ seconds/i.test(errMsg)) why = 'تلقرام حدّ الرفع مؤقتاً (سيُعاد لاحقاً)';
+        else if (/two different IP|authorization key/i.test(errMsg)) why = 'الجلسة استُخدمت من مكانين معاً (سيُعاد لاحقاً)';
         else if (/not an IPA/i.test(errMsg)) why = 'الملف المحمّل ليس تطبيقاً سليماً';
         else if (/truncated/i.test(errMsg)) why = 'التحميل انقطع قبل اكتماله';
         else if (/login failed/i.test(errMsg)) why = 'تعذّر تسجيل الدخول لموقع أحمد';
