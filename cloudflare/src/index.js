@@ -360,13 +360,16 @@ async function handleCallback(env, cq) {
   }
   if (data === 'footer') {
     const f = await getSetting(env, 'footer', '');
-    return edit(`<b>✍️ فوتر المنشور</b>\n\nالحالي:\n${H(f) || '(فاضي)'}\n\nلتغييره: أرسل «فوتر: النص الجديد»`, back);
+    await setSetting(env, 'await', 'footer');  // الرسالة التالية = الفوتر الجديد
+    return edit(`<b>✍️ فوتر المنشور</b>\n\nالحالي:\n${H(f) || '(فاضي)'}\n\n✏️ أرسل الآن النص الجديد للفوتر (أو «-» لمسحه).`, back);
   }
 }
 
 async function handleMessage(env, msg) {
   const text = (msg.text || '').trim();
+  const reply = (t) => tg(env, 'sendMessage', { chat_id: msg.chat.id, text: t });
   if (text === '/start' || text === '/panel' || text === 'لوحة' || text === '🧠 لوحتي') {
+    await setSetting(env, 'await', '');  // أي ضغطة على اللوحة تلغي وضع الانتظار
     const p = await panelMain(env);
     // زر ثابت «🧠 لوحتي» يظهر جنب مربع الكتابة — اضغطه أي وقت بدل ما تكتب /start
     await tg(env, 'sendMessage', {
@@ -375,9 +378,15 @@ async function handleMessage(env, msg) {
     });
     return tg(env, 'sendMessage', { chat_id: msg.chat.id, text: p.text, parse_mode: 'HTML', reply_markup: { inline_keyboard: p.kb } });
   }
+  // وضع انتظار الفوتر: الرسالة التالية بعد ضغط «الفوتر» تصير الفوتر
+  if ((await getSetting(env, 'await', '')) === 'footer') {
+    await setSetting(env, 'await', '');
+    await setSetting(env, 'footer', text === '-' ? '' : text);
+    return reply(text === '-' ? '✅ مُسح الفوتر.' : '✅ حُدّث الفوتر.');
+  }
   if (text.startsWith('فوتر:')) {
     await setSetting(env, 'footer', text.slice(5).trim());
-    return tg(env, 'sendMessage', { chat_id: msg.chat.id, text: '✅ حُدّث الفوتر.' });
+    return reply('✅ حُدّث الفوتر.');
   }
   if (text.startsWith('حظر ')) {
     const id = text.slice(4).trim();
