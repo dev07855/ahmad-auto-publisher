@@ -71,7 +71,7 @@ async function notifyOwners(env, text, extra = {}) {
 }
 
 // ---------- تشغيل عامل GitHub ----------
-async function dispatchWorker(env, app, footer) {
+async function dispatchWorker(env, app, footer, channels) {
   const res = await fetch(`https://api.github.com/repos/${env.GH_REPO}/dispatches`, {
     method: 'POST',
     headers: {
@@ -80,9 +80,77 @@ async function dispatchWorker(env, app, footer) {
       'User-Agent': 'ahmad-auto-publisher',
       'content-type': 'application/json',
     },
-    body: JSON.stringify({ event_type: 'publish_app', client_payload: { app_id: app.app_id, download_url: app.download_url, footer: footer || '' } }),
+    body: JSON.stringify({ event_type: 'publish_app', client_payload: {
+      app_id: app.app_id, download_url: app.download_url, footer: footer || '',
+      channels: (channels || []).join(','),   // قنوات النشر لهذا التطبيق (فارغ = الرئيسية بالعامل)
+    } }),
   });
   return res.ok;
+}
+
+// القنوات المفعّلة المشتركة بقسم معيّن. إن لم تُضبط أي قناة مفعّلة إطلاقاً → القناة الرئيسية (سلوك حالي محفوظ)
+async function targetChannels(env, sectionKey) {
+  const any = await env.DB.prepare('SELECT COUNT(*) c FROM channels WHERE enabled=1').first();
+  if (!any || !any.c) {
+    const main = env.TG_CHANNEL || await getSetting(env, 'channel', '');
+    return main ? [main] : [];
+  }
+  const rows = (await env.DB.prepare(
+    `SELECT c.chat_id, c.username FROM channels c JOIN channel_sections cs ON c.chat_id = cs.chat_id
+     WHERE c.enabled = 1 AND cs.section_key = ?`).bind(sectionKey).all()).results || [];
+  return rows.map(r => r.username || r.chat_id);   // @username أضمن للتحليل من الرقم الخام
+}
+
+// جلب بيانات قناة (للتحقق/التسمية)
+async function getChat(env, chatId) {
+  const r = await tg(env, 'getChat', { chat_id: chatId });
+  return (r && r.ok) ? r.result : null;
+}
+
+// شاشة إدارة قناة: تفعيل + اختيار الأقسام (✅) + حذف
+async function channelView(env, cid) {
+  const c = await env.DB.prepare('SELECT * FROM channels WHERE chat_id=?').bind(cid).first();
+  if (!c) return null;
+  const secs = await loadSections(env, false);
+  const subs = new Set(((await env.DB.prepare('SELECT section_key FROM channel_sections WHERE chat_id=?').bind(cid).all()).results || []).map(r => r.section_key));
+  const kb = secs.map(s => [{ text: `${subs.has(s.key) ? '✅' : '⬜️'} ${s.name}`, callback_data: `chsec_${cid}_${s.key}` }]);
+  kb.push([{ text: c.enabled ? '🔴 إيقاف القناة' : '🟢 تفعيل القناة', callback_data: `chtog_${cid}` }]);
+  kb.push([{ text: '🗑️ حذف القناة', callback_data: `chdel_${cid}` }]);
+  kb.push([{ text: '⬅️ القنوات', callback_data: 'channels' }]);
+  const text = `<b>${H(c.name || cid)}</b>\nالحالة: ${c.enabled ? '🟢 مفعّلة' : '⚪️ موقوفة'}\n\nاختر الأقسام اللي تنشر بهالقناة (✅ = تنشر فيها):`;
+  return { text, kb };
+}
+
+// شاشة الدايلبات: قائمة + المؤشّر ✅ للفعّال + زر حذف (نستخدم rowid بالأزرار لأمان الأسماء)
+async function dylibsView(env) {
+  const rows = (await env.DB.prepare('SELECT rowid AS id,name,size FROM dylibs ORDER BY added_at DESC').all()).results || [];
+  const active = await getSetting(env, 'dylib_active', '');
+  const kb = rows.map(r => [
+    { text: `${r.name === active ? '✅' : '⬜️'} ${r.name}`, callback_data: `dyl_${r.id}` },
+    { text: '🗑️', callback_data: `dyldel_${r.id}` },
+  ]);
+  const text = rows.length
+    ? '<b>📎 الدايلب</b>\nالفعّال ✅ يُحقن بكل التطبيقات. اضغط اسماً ليصير الفعّال، أو 🗑️ للحذف.\n\n<i>لإضافة: أرسل ملف .dylib هنا.</i>'
+    : '<b>📎 الدايلب</b>\n\nما فيه دايلبات بعد.\n\n<i>أرسل ملف .dylib للبوت هنا وبيتخزّن باسمه ويصير الفعّال.</i>';
+  return { text, kb };
+}
+
+// اكتشاف تلقائي: عند جعل البوت مشرفاً بقناة → تُسجّل (موقوفة) ويُنبَّه المالك؛ وعند إزالته → تُوقَف
+async function handleMyChatMember(env, upd) {
+  const chat = upd.chat;
+  if (!chat || chat.type !== 'channel') return;
+  const chatId = String(chat.id);
+  const status = upd.new_chat_member ? upd.new_chat_member.status : '';
+  if (status === 'administrator') {
+    const ex = await env.DB.prepare('SELECT 1 FROM channels WHERE chat_id=?').bind(chatId).first();
+    if (!ex) {
+      await env.DB.prepare('INSERT INTO channels(chat_id,name,username,enabled,added_at) VALUES(?,?,?,0,?)')
+        .bind(chatId, chat.title || '', chat.username ? '@' + chat.username : '', nowSec()).run();
+      await notifyOwners(env, `📢 <b>قناة جديدة اكتُشفت</b>\n\n${H(chat.title || chatId)}\n\nافتح «📢 القنوات» لتفعيلها واختيار أقسامها.`);
+    }
+  } else if (status === 'left' || status === 'kicked') {
+    await env.DB.prepare("UPDATE channels SET enabled=0 WHERE chat_id=?").bind(chatId).run();
+  }
 }
 
 // ---------- المنطق الأساسي: الطابور ----------
@@ -195,7 +263,9 @@ async function tick(env) {
     if (quota <= 0) continue;
     const infl = await sectionInFlight(env, s.key);
     if (infl >= quota) continue;
-    eligible.push({ key: s.key, name: s.name, quota, infl, ratio: infl / quota });
+    const chans = await targetChannels(env, s.key);
+    if (!chans.length) continue;                        // لا قناة مفعّلة تريد هذا القسم → تخطَّ
+    eligible.push({ key: s.key, name: s.name, quota, infl, ratio: infl / quota, chans });
   }
   if (!eligible.length) return 'idle';
   // الخلط: اختر الأقل نسبةً (يوزّع بالتناوب)؛ التجميع: بترتيب الأقسام
@@ -213,7 +283,7 @@ async function tick(env) {
       .bind(nowSec(), next.app_id).run();
     if (!claim.meta || claim.meta.changes !== 1) continue;
 
-    const ok = await dispatchWorker(env, next, footer);
+    const ok = await dispatchWorker(env, next, footer, s.chans);
     if (!ok) {
       await env.DB.prepare("UPDATE queue SET status='pending' WHERE app_id=?").bind(next.app_id).run();
       await logEvent(env, 'error', `فشل إطلاق العامل ${next.app_id}`);
@@ -281,6 +351,7 @@ async function panelMain(env) {
     [{ text: '👥 المشتركون', callback_data: 'subs' }, { text: '📊 التقرير', callback_data: 'report' }],
     [{ text: '🕐 إيقاف مؤقت', callback_data: 'pause' }],
     [{ text: '🚫 القائمة السوداء', callback_data: 'black' }, { text: '✍️ الفوتر', callback_data: 'footer' }],
+    [{ text: '📢 القنوات', callback_data: 'channels' }, { text: '📎 الدايلب', callback_data: 'dylibs' }],
     [{ text: '👤 الملّاك', callback_data: 'owners' }, { text: '📖 دليل الاستخدام', callback_data: 'guide' }],
     [{ text: '🔄 تحديث', callback_data: 'home' }],
   ];
@@ -314,9 +385,11 @@ async function handleCallback(env, cq) {
     const app = await env.DB.prepare("SELECT * FROM queue WHERE app_id=? AND status='pending'").bind(id).first();
     if (!app) return edit('⚠️ هذا التطبيق ما عاد بالطابور (نُشر أو أُزيل).', back);
     // مطالبة ذرّية ثم إطلاق فوري بغضّ النظر عن حدّ القسم
+    const chans = await targetChannels(env, app.section);
+    if (!chans.length) return edit('⚠️ ما فيه قناة مفعّلة تستقبل قسم هذا التطبيق.\nفعّل قناة واربطها بالقسم من «📢 القنوات».', back);
     const claim = await env.DB.prepare("UPDATE queue SET status='processing', processing_at=? WHERE app_id=? AND status='pending'").bind(nowSec(), id).run();
     if (!claim.meta || claim.meta.changes !== 1) return edit('⚠️ يُعالَج بالفعل الآن.', back);
-    const ok = await dispatchWorker(env, app, await getSetting(env, 'footer', ''));
+    const ok = await dispatchWorker(env, app, await getSetting(env, 'footer', ''), chans);
     if (!ok) {
       await env.DB.prepare("UPDATE queue SET status='pending' WHERE app_id=?").bind(id).run();
       return edit('❌ تعذّر الإطلاق، جرّب بعد لحظات.', back);
@@ -533,6 +606,65 @@ async function handleCallback(env, cq) {
     return edit('➕ أرسل الآن رقم تلقرام الرقمي للمالك الجديد.\n(يجيبه من بوت @userinfobot):', [[{ text: '⬅️ رجوع', callback_data: 'owners' }]]);
   }
 
+  // ═══ 📢 القنوات ═══
+  if (data === 'channels') {
+    const chans = (await env.DB.prepare('SELECT chat_id,name,enabled FROM channels ORDER BY added_at ASC').all()).results || [];
+    const kb = chans.map(c => [{ text: `${c.enabled ? '🟢' : '⚪️'} ${c.name || c.chat_id}`, callback_data: `ch_${c.chat_id}` }]);
+    kb.push(...back);
+    const note = chans.length ? 'اختر قناة لإدارتها (تفعيل + أقسامها):' : 'ما فيه قنوات بعد.';
+    return edit(`<b>📢 القنوات</b>\n${note}\n\n<i>لإضافة قناة: خلِّ البوت مشرفاً فيها، وتظهر هنا تلقائياً.</i>`, kb);
+  }
+  const chsecm = data.match(/^chsec_(-?\d+)_([a-z0-9]+)$/);
+  if (chsecm) {
+    const cid = chsecm[1], sk = chsecm[2];
+    const ex = await env.DB.prepare('SELECT 1 FROM channel_sections WHERE chat_id=? AND section_key=?').bind(cid, sk).first();
+    if (ex) await env.DB.prepare('DELETE FROM channel_sections WHERE chat_id=? AND section_key=?').bind(cid, sk).run();
+    else await env.DB.prepare('INSERT OR IGNORE INTO channel_sections(chat_id,section_key) VALUES(?,?)').bind(cid, sk).run();
+    const v = await channelView(env, cid);
+    return v ? edit(v.text, v.kb) : edit('⚠️ القناة ما عادت موجودة.', [[{ text: '⬅️ القنوات', callback_data: 'channels' }]]);
+  }
+  const chtogm = data.match(/^chtog_(-?\d+)$/);
+  if (chtogm) {
+    await env.DB.prepare('UPDATE channels SET enabled=1-enabled WHERE chat_id=?').bind(chtogm[1]).run();
+    const v = await channelView(env, chtogm[1]);
+    return v ? edit(v.text, v.kb) : edit('⚠️ القناة ما عادت موجودة.', [[{ text: '⬅️ القنوات', callback_data: 'channels' }]]);
+  }
+  const chdelm = data.match(/^chdel_(-?\d+)$/);
+  if (chdelm) {
+    await env.DB.prepare('DELETE FROM channels WHERE chat_id=?').bind(chdelm[1]).run();
+    await env.DB.prepare('DELETE FROM channel_sections WHERE chat_id=?').bind(chdelm[1]).run();
+    return edit('🗑️ حُذفت القناة.', [[{ text: '⬅️ القنوات', callback_data: 'channels' }]]);
+  }
+  const chm = data.match(/^ch_(-?\d+)$/);
+  if (chm) {
+    const v = await channelView(env, chm[1]);
+    return v ? edit(v.text, v.kb) : edit('⚠️ القناة ما عادت موجودة.', [[{ text: '⬅️ القنوات', callback_data: 'channels' }]]);
+  }
+
+  // ═══ 📎 الدايلب ═══
+  if (data === 'dylibs') {
+    const v = await dylibsView(env);
+    return edit(v.text, [...v.kb, ...back]);
+  }
+  const dyldelm = data.match(/^dyldel_(\d+)$/);
+  if (dyldelm) {
+    const r = await env.DB.prepare('SELECT name FROM dylibs WHERE rowid=?').bind(dyldelm[1]).first();
+    if (r) {
+      await env.DYLIBS.delete(r.name);
+      await env.DB.prepare('DELETE FROM dylibs WHERE rowid=?').bind(dyldelm[1]).run();
+      if (await getSetting(env, 'dylib_active', '') === r.name) await setSetting(env, 'dylib_active', '');
+    }
+    const v = await dylibsView(env);
+    return edit(v.text, [...v.kb, ...back]);
+  }
+  const dylm = data.match(/^dyl_(\d+)$/);
+  if (dylm) {
+    const r = await env.DB.prepare('SELECT name FROM dylibs WHERE rowid=?').bind(dylm[1]).first();
+    if (r) await setSetting(env, 'dylib_active', r.name);
+    const v = await dylibsView(env);
+    return edit(v.text, [...v.kb, ...back]);
+  }
+
   if (data === 'guide') {
     const g =
 `<b>📖 دليل استخدام البوت</b>
@@ -590,6 +722,24 @@ async function handleMessage(env, msg) {
     });
     return tg(env, 'sendMessage', { chat_id: msg.chat.id, text: p.text, parse_mode: 'HTML', reply_markup: { inline_keyboard: p.kb } });
   }
+  // استقبال ملف دايلب: يُخزَّن باسمه بمخزن KV ويُسجَّل بالجدول
+  if (msg.document) {
+    const doc = msg.document;
+    const fname = (doc.file_name || '').trim();
+    if (!/\.dylib$/i.test(fname)) return reply('❌ أرسل ملفاً بامتداد .dylib');
+    if (doc.file_size && doc.file_size > 20 * 1024 * 1024) return reply('❌ الملف كبير (أقصى 20 ميجا للبوت).');
+    const gf = await tg(env, 'getFile', { file_id: doc.file_id });
+    if (!gf.ok || !gf.result || !gf.result.file_path) return reply('❌ تعذّر جلب الملف من تلقرام.');
+    const fresp = await fetch(`https://api.telegram.org/file/bot${env.TG_BOT_TOKEN}/${gf.result.file_path}`);
+    if (!fresp.ok) return reply('❌ تعذّر تنزيل الملف.');
+    const buf = await fresp.arrayBuffer();
+    await env.DYLIBS.put(fname, buf);
+    await env.DB.prepare('INSERT OR REPLACE INTO dylibs(name,size,added_at) VALUES(?,?,?)').bind(fname, buf.byteLength, nowSec()).run();
+    const active = await getSetting(env, 'dylib_active', '');
+    if (!active) await setSetting(env, 'dylib_active', fname);
+    return reply(`✅ حُفظ الدايلب «${fname}» (${Math.round(buf.byteLength / 1024)} ك.ب).${active ? '\nفعّله من «📎 الدايلب».' : '\nصار هو الفعّال المحقون.'}`);
+  }
+
   const awaiting = await getSetting(env, 'await', '');
   // وضع انتظار الفوتر: الرسالة التالية بعد ضغط «الفوتر» تصير الفوتر
   if (awaiting === 'footer') {
@@ -771,6 +921,28 @@ async function maybeWeeklySummary(env) {
   await notifyOwners(env, `<b>🗓️ تقرير الأسبوع</b>\n\nنُشر إجمالاً: ${total}\nأنشط قسم: ${topName}${subsLine}\n\n${lines.join('\n')}\n\n⚠️ أخطاء الأسبوع: ${errs}`);
 }
 
+// تهيئة تلقائية لمرة واحدة: تسجيل القناة الرئيسية (كل الأقسام) + ضبط الويبهوك لاستقبال my_chat_member
+async function maybeBootstrap(env) {
+  if ((await getSetting(env, 'bootstrapped', '')) === '1') return;
+  const cnt = (await env.DB.prepare('SELECT COUNT(*) c FROM channels').first()).c;
+  if (!cnt && env.TG_CHANNEL) {
+    const ch = await getChat(env, env.TG_CHANNEL);
+    if (!ch) return;                                   // فشل getChat — نعيد المحاولة التِّكّة الجاية
+    const cid = String(ch.id);
+    await env.DB.prepare('INSERT OR IGNORE INTO channels(chat_id,name,username,enabled,added_at) VALUES(?,?,?,1,?)')
+      .bind(cid, ch.title || '', ch.username ? '@' + ch.username : '', nowSec()).run();
+    for (const s of await loadSections(env, false)) {
+      await env.DB.prepare('INSERT OR IGNORE INTO channel_sections(chat_id,section_key) VALUES(?,?)').bind(cid, s.key).run();
+    }
+  }
+  const wh = await tg(env, 'setWebhook', {
+    url: 'https://ahmad-auto-publisher.tamerapp-api.workers.dev/telegram',
+    secret_token: env.TG_WEBHOOK_SECRET,
+    allowed_updates: ['message', 'callback_query', 'my_chat_member'],
+  });
+  if (wh && wh.ok) await setSetting(env, 'bootstrapped', '1');
+}
+
 // ---------- المُوجّه ----------
 export default {
   async fetch(request, env) {
@@ -786,6 +958,12 @@ export default {
       }
       const u = await readJson();
       if (!u) return new Response('ok');
+      // اكتشاف القنوات: عند تغيّر عضوية البوت بقناة — فقط لو المُغيِّر مالك
+      if (u.my_chat_member) {
+        const changer = u.my_chat_member.from ? String(u.my_chat_member.from.id) : '';
+        if ((await getOwners(env)).includes(changer)) await handleMyChatMember(env, u.my_chat_member);
+        return new Response('ok');
+      }
       const from = u.callback_query ? u.callback_query.from : (u.message ? u.message.from : null);
       const owners = await getOwners(env);
       if (!from || !owners.includes(String(from.id))) return new Response('ok'); // للملّاك فقط
@@ -799,6 +977,42 @@ export default {
       if (request.headers.get('x-secret') !== env.ENQUEUE_SECRET) return new Response('forbidden', { status: 403 });
       const secs = await loadSections(env, true);
       return Response.json({ sections: secs.map(s => ({ key: s.key, path: s.path })) });
+    }
+
+    // الدايلب الفعّال (يسحبه العامل وقت الحقن بدل السر الثابت)
+    if (url.pathname === '/dylib' && request.method === 'GET') {
+      if (request.headers.get('x-secret') !== env.ENQUEUE_SECRET) return new Response('forbidden', { status: 403 });
+      const active = await getSetting(env, 'dylib_active', '');
+      if (!active) return new Response('', { status: 404 });
+      const data = await env.DYLIBS.get(active, 'arrayBuffer');
+      if (!data) return new Response('', { status: 404 });
+      return new Response(data, { headers: { 'content-type': 'application/octet-stream' } });
+    }
+
+    // تهيئة لمرة واحدة: تسجيل القناة الرئيسية (كل الأقسام) + ضبط الويبهوك ليستقبل my_chat_member
+    if (url.pathname === '/admin/setup' && request.method === 'POST') {
+      if (request.headers.get('x-secret') !== env.ENQUEUE_SECRET) return new Response('forbidden', { status: 403 });
+      let seeded = null;
+      const cnt = (await env.DB.prepare('SELECT COUNT(*) c FROM channels').first()).c;
+      if (!cnt && env.TG_CHANNEL) {
+        const ch = await getChat(env, env.TG_CHANNEL);
+        if (ch) {
+          const cid = String(ch.id);
+          await env.DB.prepare('INSERT OR IGNORE INTO channels(chat_id,name,username,enabled,added_at) VALUES(?,?,?,1,?)')
+            .bind(cid, ch.title || '', ch.username ? '@' + ch.username : '', nowSec()).run();
+          for (const s of await loadSections(env, false)) {
+            await env.DB.prepare('INSERT OR IGNORE INTO channel_sections(chat_id,section_key) VALUES(?,?)').bind(cid, s.key).run();
+          }
+          seeded = { chat_id: cid, name: ch.title };
+        }
+      }
+      const origin = new URL(request.url).origin;
+      const wh = await tg(env, 'setWebhook', {
+        url: origin + '/telegram',
+        secret_token: env.TG_WEBHOOK_SECRET,
+        allowed_updates: ['message', 'callback_query', 'my_chat_member'],
+      });
+      return Response.json({ seeded, webhook_ok: !!(wh && wh.ok) });
     }
 
     // جلسة بوت تلقرام المحفوظة (يعيد العامل استخدامها بدل تسجيل دخول كل مرة → لا FloodWait)
@@ -865,6 +1079,7 @@ export default {
 
   async scheduled(event, env, ctx) {
     ctx.waitUntil((async () => {
+      await maybeBootstrap(env);
       await tick(env);
       await maybeHealthCheck(env);
       await maybeSubsWatch(env);

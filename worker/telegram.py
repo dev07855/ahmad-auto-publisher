@@ -30,6 +30,16 @@ def _save_session(cfg, s):
     except Exception as e:
         print("[tg] save session failed:", e)
 
+def _norm_chan(c):
+    """معرّف القناة: @username كما هو، والرقم (-100…) يُحوّل int ليحلّه Telethon."""
+    c = str(c).strip()
+    if not c or c.startswith("@"):
+        return c
+    try:
+        return int(c)
+    except ValueError:
+        return c
+
 async def _publish_once(cfg, ipa_path, caption, thumb):
     saved = _load_session(cfg) if cfg.get("brain") else ""
     client = TelegramClient(StringSession(saved), int(cfg["api_id"]), cfg["api_hash"])
@@ -40,16 +50,25 @@ async def _publish_once(cfg, ipa_path, caption, thumb):
         if cfg.get("brain"):
             _save_session(cfg, client.session.save())
     try:
-        chan = cfg["channel"]
+        channels = cfg.get("channels") or ([cfg["channel"]] if cfg.get("channel") else [])
+        channels = [_norm_chan(c) for c in channels if str(c).strip()]
+        if not channels:
+            raise RuntimeError("no target channel(s) to publish to")
         fname = os.path.basename(ipa_path)
 
-        # رسالة واحدة نظيفة وفخمة: الملف (IPA) يحمل أيقونة التطبيق الصغيرة كصورة مصغّرة
-        # + الوصف المنسّق كتعليق. تُنشر كرسالة واحدة فقط بعد اكتمال الرفع (بلا فجوة، بلا صورة كبيرة).
-        await client.send_file(
-            chan, ipa_path, caption=caption, parse_mode="html",
+        # رسالة واحدة نظيفة وفخمة: الملف (IPA) يحمل أيقونة التطبيق كصورة مصغّرة + الوصف تعليقاً.
+        # يُرفع الملف مرة للقناة الأولى، ثم يُعاد استخدام نفس ملف تلقرام لباقي القنوات (بلا إعادة رفع).
+        first = await client.send_file(
+            channels[0], ipa_path, caption=caption, parse_mode="html",
             force_document=True, thumb=thumb, part_size_kb=512,
             attributes=[DocumentAttributeFilename(fname)],
         )
+        for chan in channels[1:]:
+            await client.send_file(
+                chan, first.media, caption=caption, parse_mode="html",
+                force_document=True,
+                attributes=[DocumentAttributeFilename(fname)],
+            )
     finally:
         await client.disconnect()
 

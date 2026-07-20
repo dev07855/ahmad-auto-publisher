@@ -36,4 +36,5 @@ jobs:
           APP_ID: ${{ github.event.client_payload.app_id }}
           DL: ${{ github.event.client_payload.download_url }}
           FOOTER: ${{ github.event.client_payload.footer }}
+          CHANNELS: ${{ github.event.client_payload.channels }}
         run: python run_publish.py

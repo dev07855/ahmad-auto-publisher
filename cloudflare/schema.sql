@@ -50,6 +50,29 @@ CREATE TABLE IF NOT EXISTS blacklist (
   name   TEXT
 );
 
+-- القنوات (يكتشفها البوت عند جعله مشرفاً؛ يفعّلها المالك ويختار أقسامها)
+CREATE TABLE IF NOT EXISTS channels (
+  chat_id  TEXT PRIMARY KEY,        -- معرّف القناة (-100…)
+  name     TEXT,                    -- عنوان القناة
+  username TEXT,                    -- @username إن وُجد (أضمن للنشر)
+  enabled  INTEGER DEFAULT 0,       -- 0 = مكتشفة/موقوفة | 1 = مفعّلة
+  added_at INTEGER
+);
+
+-- ربط القنوات بالأقسام (متعدّد لمتعدّد): قناة تنشر قسماً إن وُجد الصف
+CREATE TABLE IF NOT EXISTS channel_sections (
+  chat_id     TEXT,
+  section_key TEXT,
+  PRIMARY KEY (chat_id, section_key)
+);
+
+-- فهرس الدايلبات المخزّنة (الملفات نفسها في KV باسم الدايلب؛ الفعّال في settings.dylib_active)
+CREATE TABLE IF NOT EXISTS dylibs (
+  name     TEXT PRIMARY KEY,        -- اسم الملف (يُرسله المالك للبوت)
+  size     INTEGER,
+  added_at INTEGER
+);
+
 -- سجل الأحداث (لعرض التقارير بالبوت)
 CREATE TABLE IF NOT EXISTS log (
   id    INTEGER PRIMARY KEY AUTOINCREMENT,
