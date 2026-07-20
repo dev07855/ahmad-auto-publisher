@@ -54,7 +54,8 @@ def main(ipa_in, dylib, ipa_out):
         # 3) repackage (preserve tree; symlinks are rare in IPAs and re-signing handles the rest)
         if os.path.exists(ipa_out):
             os.remove(ipa_out)
-        with zipfile.ZipFile(ipa_out, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
+        # ضغط سريع (level=1): محتوى IPA مضغوط أصلاً، فالمستوى العالي يضيّع وقتاً بلا فائدة تُذكر
+        with zipfile.ZipFile(ipa_out, "w", zipfile.ZIP_DEFLATED, compresslevel=1) as z:
             for root, _, files in os.walk(payload):
                 for fn in files:
                     fp = os.path.join(root, fn)

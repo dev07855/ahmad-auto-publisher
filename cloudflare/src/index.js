@@ -172,6 +172,9 @@ async function sectionInFlight(env, section) {
 async function reclaimStuck(env) {
   await env.DB.prepare("UPDATE queue SET status='pending' WHERE status='processing' AND processing_at < ?")
     .bind(nowSec() - PROCESSING_TIMEOUT).run();
+  // نظّف صفوف الفشل القديمة (أسبوع+): تمنع تراكمها وتمنح التطبيق فرصة دورية لو رجع سليماً
+  await env.DB.prepare("DELETE FROM queue WHERE status='failed' AND processing_at < ?")
+    .bind(nowSec() - 7 * 86400).run();
 }
 
 // يُنادى من الكرون: أطلق تطبيقاً واحداً من قسم لم يبلغ حدّه بعد
