@@ -542,7 +542,18 @@ export default {
         .bind(giveUp ? 'failed' : 'pending', attempts, body.app_id).run();
       await logEvent(env, 'error', `${isDead ? '☠️ تالف' : 'فشل'} ${body.app_id}${isDead ? '' : ` (محاولة ${attempts})`}: ${errMsg.slice(0, 140)}`);
       if (attempts >= 3 && !isDead) {
-        await tg(env, 'sendMessage', { chat_id: env.OWNER_ID, text: `⚠️ تخطّي التطبيق ${H(body.app_id)} بعد 3 محاولات فاشلة` });
+        // اسم التطبيق + سبب الفشل الواضح
+        const q = await env.DB.prepare('SELECT name FROM queue WHERE app_id=?').bind(body.app_id).first();
+        const nm = q && q.name ? q.name : body.app_id;
+        let why = errMsg.slice(0, 180);
+        if (/wait of \d+ seconds/i.test(errMsg)) why = 'تلقرام حدّ الرفع مؤقتاً (سيُعاد لاحقاً)';
+        else if (/not an IPA/i.test(errMsg)) why = 'الملف المحمّل ليس تطبيقاً سليماً';
+        else if (/truncated/i.test(errMsg)) why = 'التحميل انقطع قبل اكتماله';
+        else if (/login failed/i.test(errMsg)) why = 'تعذّر تسجيل الدخول لموقع أحمد';
+        await tg(env, 'sendMessage', {
+          chat_id: env.OWNER_ID, parse_mode: 'HTML',
+          text: `⚠️ <b>تُخطّي: ${H(nm)}</b>\nرقم: ${H(body.app_id)}\nالسبب: ${H(why)}`,
+        });
       }
       return Response.json({ ok: true });
     }

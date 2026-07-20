@@ -146,8 +146,9 @@ def process(app_id, download_url=None, footer=None):
                 img = bg
             else:
                 img = img.convert("RGB")
-            img.thumbnail((320, 320))
-            img.save(thumb, "JPEG", quality=88)
+            # ثبّت 320×320 (تلقرام يعرضها أوضح؛ thumbnail وحده لا يكبّر الأيقونات الصغيرة)
+            img = img.resize((320, 320), Image.LANCZOS)
+            img.save(thumb, "JPEG", quality=90)
         except Exception as e:
             print("[thumb] skip:", e)
             thumb = None
