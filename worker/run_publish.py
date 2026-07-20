@@ -25,7 +25,6 @@ def run():
         out, caption, thumb, info = worker.process(app_id, dl, footer=footer)
         workdir = os.path.dirname(out)
         cfg = telegram.cfg_from_env()
-        cfg["photo"] = info.get("_photo")   # صورة التطبيق الكبيرة تُنشر مع الوصف
         telegram.publish(cfg, out, caption, thumb)
         notify("/published", {"app_id": app_id, "name": info.get("name", ""), "version": info.get("version", "")})
         print("PUBLISHED", app_id, info.get("name"))

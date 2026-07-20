@@ -43,29 +43,13 @@ async def _publish_once(cfg, ipa_path, caption, thumb):
         chan = cfg["channel"]
         fname = os.path.basename(ipa_path)
 
-        # ONE cohesive premium message: the IPA document carries the app icon as its
-        # thumbnail AND the formatted features as its caption. Passing the file PATH
-        # directly (not a pre-uploaded handle) makes Telethon reliably attach the thumb,
-        # and it still posts as a SINGLE atomic message that only appears AFTER the upload
-        # finishes — so there is no gap and the icon always shows.
-        photo = cfg.get("photo")
-        if photo and os.path.exists(photo):
-            # 1) ارفع الملف الكبير أولاً بصمت (لا شيء يُنشر بعد) — يضمن عدم وجود فجوة
-            handle = await client.upload_file(ipa_path, part_size_kb=512)
-            # 2) انشر صورة التطبيق الواضحة + الوصف
-            await client.send_file(chan, photo, caption=caption, parse_mode="html")
-            # 3) ثم الملف مباشرة (فوري لأنه مرفوع)
-            await client.send_file(
-                chan, handle, force_document=True, thumb=thumb,
-                attributes=[DocumentAttributeFilename(fname)],
-            )
-        else:
-            # لا صورة متاحة: رسالة واحدة (الملف + الوصف)
-            await client.send_file(
-                chan, ipa_path, caption=caption, parse_mode="html",
-                force_document=True, thumb=thumb, part_size_kb=512,
-                attributes=[DocumentAttributeFilename(fname)],
-            )
+        # رسالة واحدة نظيفة وفخمة: الملف (IPA) يحمل أيقونة التطبيق الصغيرة كصورة مصغّرة
+        # + الوصف المنسّق كتعليق. تُنشر كرسالة واحدة فقط بعد اكتمال الرفع (بلا فجوة، بلا صورة كبيرة).
+        await client.send_file(
+            chan, ipa_path, caption=caption, parse_mode="html",
+            force_document=True, thumb=thumb, part_size_kb=512,
+            attributes=[DocumentAttributeFilename(fname)],
+        )
     finally:
         await client.disconnect()
 
