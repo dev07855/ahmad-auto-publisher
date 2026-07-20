@@ -296,11 +296,18 @@ async function handleCallback(env, cq) {
     const kb = [
       opts.slice(0, 4).map(n => ({ text: String(n), callback_data: `setsec_${key}_${n}` })),
       opts.slice(4).map(n => ({ text: String(n), callback_data: `setsec_${key}_${n}` })),
+      [{ text: '✏️ رقم مخصّص', callback_data: `numsec_${key}` }],
       [{ text: s.enabled ? '⛔️ إيقاف القسم' : '✅ تفعيل القسم', callback_data: `toggsec_${key}` }],
     ];
     if (key !== 'updates') kb.push([{ text: '🗑️ حذف القسم', callback_data: `delsec_${key}` }]);
     kb.push([{ text: '⬅️ الأقسام', callback_data: 'secs' }]);
-    return edit(`<b>${s.name}</b>\nالعدد بالساعة (0 = يوقف مؤقتاً):\nلعدد مخصّص أرسل: «عدد ${key} 12»`, kb);
+    return edit(`<b>${s.name}</b>\nالعدد الحالي: ${s.quota}/ساعة\nاختر رقماً، أو «✏️ رقم مخصّص» لأي رقم:`, kb);
+  }
+  // وضع انتظار: أرسل رقماً فيصير عدد القسم
+  const nm = data.match(/^numsec_([a-z0-9]+)$/);
+  if (nm && await sectionExists(env, nm[1])) {
+    await setSetting(env, 'await', 'num:' + nm[1]);
+    return edit(`✏️ أرسل الآن الرقم اللي تبيه لعدد <b>${await sectionName(env, nm[1])}</b> بالساعة:`, [[{ text: '⬅️ رجوع', callback_data: `sec_${nm[1]}` }]]);
   }
   // حفظ عدد قسم
   const ms = data.match(/^setsec_([a-z0-9]+)_(\d+)$/);
@@ -378,11 +385,20 @@ async function handleMessage(env, msg) {
     });
     return tg(env, 'sendMessage', { chat_id: msg.chat.id, text: p.text, parse_mode: 'HTML', reply_markup: { inline_keyboard: p.kb } });
   }
+  const awaiting = await getSetting(env, 'await', '');
   // وضع انتظار الفوتر: الرسالة التالية بعد ضغط «الفوتر» تصير الفوتر
-  if ((await getSetting(env, 'await', '')) === 'footer') {
+  if (awaiting === 'footer') {
     await setSetting(env, 'await', '');
     await setSetting(env, 'footer', text === '-' ? '' : text);
     return reply(text === '-' ? '✅ مُسح الفوتر.' : '✅ حُدّث الفوتر.');
+  }
+  // وضع انتظار رقم لقسم: الرسالة التالية (رقم) تصير عدد القسم
+  if (awaiting.startsWith('num:')) {
+    const key = awaiting.slice(4);
+    await setSetting(env, 'await', '');
+    if (!/^\d+$/.test(text) || !(await sectionExists(env, key))) return reply('❌ أرسل رقماً صحيحاً.');
+    await env.DB.prepare('UPDATE sections SET quota=? WHERE key=?').bind(safeCount(text, 5), key).run();
+    return reply(`✅ عدد ${await sectionName(env, key)} = ${safeCount(text, 5)}/ساعة.`);
   }
   if (text.startsWith('فوتر:')) {
     await setSetting(env, 'footer', text.slice(5).trim());
