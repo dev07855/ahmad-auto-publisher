@@ -71,7 +71,7 @@ async function notifyOwners(env, text, extra = {}) {
 }
 
 // ---------- تشغيل عامل GitHub ----------
-async function dispatchWorker(env, app, footer, channels) {
+async function dispatchWorker(env, app, footer, groups) {
   const res = await fetch(`https://api.github.com/repos/${env.GH_REPO}/dispatches`, {
     method: 'POST',
     headers: {
@@ -82,23 +82,31 @@ async function dispatchWorker(env, app, footer, channels) {
     },
     body: JSON.stringify({ event_type: 'publish_app', client_payload: {
       app_id: app.app_id, download_url: app.download_url, footer: footer || '',
-      channels: (channels || []).join(','),   // قنوات النشر لهذا التطبيق (فارغ = الرئيسية بالعامل)
+      groups: groups || [],   // [{dylib, channels}] — العامل يحقن لكل مجموعة (toJSON بالورك فلو)
     } }),
   });
   return res.ok;
 }
 
-// القنوات المفعّلة المشتركة بقسم معيّن. إن لم تُضبط أي قناة مفعّلة إطلاقاً → القناة الرئيسية (سلوك حالي محفوظ)
-async function targetChannels(env, sectionKey) {
+// مجموعات النشر لقسم: [{dylib, channels:[ident,...]}] — القنوات مجمّعة حسب دايلبها
+// (قنوات نفس الدايلب = مجموعة واحدة تُحقن مرة؛ إن لم تُضبط قنوات → الرئيسية بالدايلب الفعّال)
+async function targetGroups(env, sectionKey) {
+  const active = await getSetting(env, 'dylib_active', '');
   const any = await env.DB.prepare('SELECT COUNT(*) c FROM channels WHERE enabled=1').first();
   if (!any || !any.c) {
     const main = env.TG_CHANNEL || await getSetting(env, 'channel', '');
-    return main ? [main] : [];
+    return main ? [{ dylib: active, channels: [main] }] : [];
   }
   const rows = (await env.DB.prepare(
-    `SELECT c.chat_id, c.username FROM channels c JOIN channel_sections cs ON c.chat_id = cs.chat_id
+    `SELECT c.chat_id, c.username, c.dylib FROM channels c JOIN channel_sections cs ON c.chat_id = cs.chat_id
      WHERE c.enabled = 1 AND cs.section_key = ?`).bind(sectionKey).all()).results || [];
-  return rows.map(r => r.username || r.chat_id);   // @username أضمن للتحليل من الرقم الخام
+  const byDylib = {};
+  for (const r of rows) {
+    const dyl = r.dylib || active || '';             // قناة بلا دايلب خاص → الافتراضي العام
+    const ident = r.username || r.chat_id;            // @username أضمن للتحليل من الرقم الخام
+    (byDylib[dyl] = byDylib[dyl] || []).push(ident);
+  }
+  return Object.entries(byDylib).map(([dylib, channels]) => ({ dylib, channels }));
 }
 
 // جلب بيانات قناة (للتحقق/التسمية)
@@ -114,10 +122,11 @@ async function channelView(env, cid) {
   const secs = await loadSections(env, false);
   const subs = new Set(((await env.DB.prepare('SELECT section_key FROM channel_sections WHERE chat_id=?').bind(cid).all()).results || []).map(r => r.section_key));
   const kb = secs.map(s => [{ text: `${subs.has(s.key) ? '✅' : '⬜️'} ${s.name}`, callback_data: `chsec_${cid}_${s.key}` }]);
+  kb.push([{ text: `📎 دايلب القناة: ${c.dylib || 'الافتراضي العام'}`, callback_data: `chdyl_${cid}` }]);
   kb.push([{ text: c.enabled ? '🔴 إيقاف القناة' : '🟢 تفعيل القناة', callback_data: `chtog_${cid}` }]);
   kb.push([{ text: '🗑️ حذف القناة', callback_data: `chdel_${cid}` }]);
   kb.push([{ text: '⬅️ القنوات', callback_data: 'channels' }]);
-  const text = `<b>${H(c.name || cid)}</b>\nالحالة: ${c.enabled ? '🟢 مفعّلة' : '⚪️ موقوفة'}\n\nاختر الأقسام اللي تنشر بهالقناة (✅ = تنشر فيها):`;
+  const text = `<b>${H(c.name || cid)}</b>\nالحالة: ${c.enabled ? '🟢 مفعّلة' : '⚪️ موقوفة'}\nالدايلب: ${H(c.dylib || 'الافتراضي العام')}\n\nاختر الأقسام اللي تنشر بهالقناة (✅ = تنشر فيها):`;
   return { text, kb };
 }
 
@@ -263,9 +272,9 @@ async function tick(env) {
     if (quota <= 0) continue;
     const infl = await sectionInFlight(env, s.key);
     if (infl >= quota) continue;
-    const chans = await targetChannels(env, s.key);
-    if (!chans.length) continue;                        // لا قناة مفعّلة تريد هذا القسم → تخطَّ
-    eligible.push({ key: s.key, name: s.name, quota, infl, ratio: infl / quota, chans });
+    const groups = await targetGroups(env, s.key);
+    if (!groups.length) continue;                       // لا قناة مفعّلة تريد هذا القسم → تخطَّ
+    eligible.push({ key: s.key, name: s.name, quota, infl, ratio: infl / quota, groups });
   }
   if (!eligible.length) return 'idle';
   // الخلط: اختر الأقل نسبةً (يوزّع بالتناوب)؛ التجميع: بترتيب الأقسام
@@ -283,7 +292,7 @@ async function tick(env) {
       .bind(nowSec(), next.app_id).run();
     if (!claim.meta || claim.meta.changes !== 1) continue;
 
-    const ok = await dispatchWorker(env, next, footer, s.chans);
+    const ok = await dispatchWorker(env, next, footer, s.groups);
     if (!ok) {
       await env.DB.prepare("UPDATE queue SET status='pending' WHERE app_id=?").bind(next.app_id).run();
       await logEvent(env, 'error', `فشل إطلاق العامل ${next.app_id}`);
@@ -385,11 +394,11 @@ async function handleCallback(env, cq) {
     const app = await env.DB.prepare("SELECT * FROM queue WHERE app_id=? AND status='pending'").bind(id).first();
     if (!app) return edit('⚠️ هذا التطبيق ما عاد بالطابور (نُشر أو أُزيل).', back);
     // مطالبة ذرّية ثم إطلاق فوري بغضّ النظر عن حدّ القسم
-    const chans = await targetChannels(env, app.section);
-    if (!chans.length) return edit('⚠️ ما فيه قناة مفعّلة تستقبل قسم هذا التطبيق.\nفعّل قناة واربطها بالقسم من «📢 القنوات».', back);
+    const groups = await targetGroups(env, app.section);
+    if (!groups.length) return edit('⚠️ ما فيه قناة مفعّلة تستقبل قسم هذا التطبيق.\nفعّل قناة واربطها بالقسم من «📢 القنوات».', back);
     const claim = await env.DB.prepare("UPDATE queue SET status='processing', processing_at=? WHERE app_id=? AND status='pending'").bind(nowSec(), id).run();
     if (!claim.meta || claim.meta.changes !== 1) return edit('⚠️ يُعالَج بالفعل الآن.', back);
-    const ok = await dispatchWorker(env, app, await getSetting(env, 'footer', ''), chans);
+    const ok = await dispatchWorker(env, app, await getSetting(env, 'footer', ''), groups);
     if (!ok) {
       await env.DB.prepare("UPDATE queue SET status='pending' WHERE app_id=?").bind(id).run();
       return edit('❌ تعذّر الإطلاق، جرّب بعد لحظات.', back);
@@ -634,6 +643,30 @@ async function handleCallback(env, cq) {
     await env.DB.prepare('DELETE FROM channels WHERE chat_id=?').bind(chdelm[1]).run();
     await env.DB.prepare('DELETE FROM channel_sections WHERE chat_id=?').bind(chdelm[1]).run();
     return edit('🗑️ حُذفت القناة.', [[{ text: '⬅️ القنوات', callback_data: 'channels' }]]);
+  }
+  // اختيار دايلب لقناة (عرض القائمة + الافتراضي العام)
+  const chdylsetm = data.match(/^chdylset_(-?\d+)_(\d+)$/);
+  if (chdylsetm) {
+    const cid = chdylsetm[1], rid = chdylsetm[2];
+    let name = '';
+    if (rid !== '0') {
+      const r = await env.DB.prepare('SELECT name FROM dylibs WHERE rowid=?').bind(rid).first();
+      name = r ? r.name : '';
+    }
+    await env.DB.prepare('UPDATE channels SET dylib=? WHERE chat_id=?').bind(name || null, cid).run();
+    const v = await channelView(env, cid);
+    return v ? edit(v.text, v.kb) : edit('⚠️ القناة ما عادت موجودة.', [[{ text: '⬅️ القنوات', callback_data: 'channels' }]]);
+  }
+  const chdylm = data.match(/^chdyl_(-?\d+)$/);
+  if (chdylm) {
+    const cid = chdylm[1];
+    const rows = (await env.DB.prepare('SELECT rowid AS id,name FROM dylibs ORDER BY added_at DESC').all()).results || [];
+    const c = await env.DB.prepare('SELECT dylib FROM channels WHERE chat_id=?').bind(cid).first();
+    const cur = c ? (c.dylib || '') : '';
+    const kb = [[{ text: `${!cur ? '✅' : '⬜️'} الافتراضي العام`, callback_data: `chdylset_${cid}_0` }]];
+    for (const r of rows) kb.push([{ text: `${r.name === cur ? '✅' : '⬜️'} ${r.name}`, callback_data: `chdylset_${cid}_${r.id}` }]);
+    kb.push([{ text: '⬅️ رجوع', callback_data: `ch_${cid}` }]);
+    return edit('<b>📎 دايلب هذه القناة</b>\nاختر الدايلب المحقون بتطبيقات هالقناة:', kb);
   }
   const chm = data.match(/^ch_(-?\d+)$/);
   if (chm) {
@@ -986,9 +1019,9 @@ export default {
     // الدايلب الفعّال (يسحبه العامل وقت الحقن بدل السر الثابت)
     if (url.pathname === '/dylib' && request.method === 'GET') {
       if (request.headers.get('x-secret') !== env.ENQUEUE_SECRET) return new Response('forbidden', { status: 403 });
-      const active = await getSetting(env, 'dylib_active', '');
-      if (!active) return new Response('', { status: 404 });
-      const data = await env.DYLIBS.get(active, 'arrayBuffer');
+      const name = url.searchParams.get('name') || await getSetting(env, 'dylib_active', '');  // اسم محدّد أو الفعّال
+      if (!name) return new Response('', { status: 404 });
+      const data = await env.DYLIBS.get(name, 'arrayBuffer');
       if (!data) return new Response('', { status: 404 });
       return new Response(data, { headers: { 'content-type': 'application/octet-stream' } });
     }

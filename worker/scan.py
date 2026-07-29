@@ -28,20 +28,31 @@ def get_sections():
         print("get_sections failed, using fallback:", e)
         return FALLBACK_SECTIONS
 
-def scan_section(a, path, limit):
-    r = a.s.get(BASE + path, timeout=30)
-    r.raise_for_status()
-    rows = a.parse_listing(r.text, limit)
-    apps = []
-    for rank, row in enumerate(rows):
-        item = {"id": row["id"], "download_url": row["download_url"], "rank": rank}
+def scan_section(a, path, limit, pages):
+    """يمسح صفحات القسم 1..pages (النمط ?page=N)، ويقف عند أول صفحة فاضية."""
+    apps, rank = [], 0
+    for pg in range(1, pages + 1):
+        sep = '&' if '?' in path else '?'
+        url = BASE + path + (f"{sep}page={pg}" if pg > 1 else "")
         try:
-            info = a.app_info(row["id"])
-            item["name"] = info.get("name", "")
-            item["version"] = info.get("version", "")
-        except Exception:
-            pass
-        apps.append(item)
+            r = a.s.get(url, timeout=30)
+            r.raise_for_status()
+        except Exception as e:
+            print(f"  صفحة {pg} فشلت: {e}")
+            break
+        rows = a.parse_listing(r.text, limit)
+        if not rows:
+            break                       # صفحة فاضية = انتهت صفحات القسم
+        for row in rows:
+            item = {"id": row["id"], "download_url": row["download_url"], "rank": rank}
+            rank += 1
+            try:
+                info = a.app_info(row["id"])
+                item["name"] = info.get("name", "")
+                item["version"] = info.get("version", "")
+            except Exception:
+                pass
+            apps.append(item)
     return apps
 
 def main():
@@ -49,11 +60,12 @@ def main():
     ok, msg = a.login(os.environ["AHMAD_EMAIL"], os.environ["AHMAD_PASSWORD"])
     if not ok:
         print("login failed:", msg); sys.exit(1)
-    limit = int(os.environ.get("SECTION_LIMIT", "40"))
+    limit = int(os.environ.get("SCAN_LIMIT") or os.environ.get("SECTION_LIMIT") or "60")
+    pages = int(os.environ.get("SCAN_PAGES") or "3")   # عدد صفحات كل قسم (قابل للضبط)
     total = 0
     for section, path in get_sections():
         try:
-            apps = scan_section(a, path, limit)
+            apps = scan_section(a, path, limit, pages)
         except Exception as e:
             print(f"scan {section} failed: {e}"); continue
         resp = requests.post(os.environ["BRAIN_URL"].rstrip("/") + "/enqueue",

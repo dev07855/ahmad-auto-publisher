@@ -87,7 +87,9 @@ def build_caption(info, footer=None):
     parts += footer_block
     return "\n".join(parts)
 
-def process(app_id, download_url=None, footer=None):
+def prepare(app_id, download_url=None, footer=None):
+    """تحميل التطبيق + بناء الوصف والأيقونة (بلا حقن). يُرجّع (raw, caption, thumb, info, work).
+    الـ raw يبقى ليُحقن لكل مجموعة دايلب على حدة؛ حذفه مسؤولية المُنادي (تنظيف work)."""
     # validate inputs (defence-in-depth: app_id numeric, download_url on ahmad only)
     if not re.fullmatch(r'\d+', str(app_id)):
         raise RuntimeError(f"invalid app_id: {app_id!r}")
@@ -95,8 +97,7 @@ def process(app_id, download_url=None, footer=None):
         raise RuntimeError("download_url must be on ahmad-up.com")
 
     a = Ahmad()
-    # metadata (public, no auth)
-    info = a.app_info(app_id)
+    info = a.app_info(app_id)                       # metadata (public, no auth)
     print(f"[info] {info.get('name')} v{info.get('version')}")
 
     # حد تلقرام للرفع عبر البوت ≈ 2 جيجا — تخطٍّ فوري قبل تحميل ملف ضخم بلا فائدة
@@ -124,18 +125,8 @@ def process(app_id, download_url=None, footer=None):
     _, total, done = a.download(download_url, raw, verify_ipa=True)
     print(f"[download] {done} bytes")
 
-    # MANDATORY dylib injection gate — nothing publishes without it
-    out = os.path.join(work, clean_name(info.get("name"), info.get("version", "")))
-    dylib = os.environ.get("DYLIB_PATH", "fixipa.dylib")
-    injector.main(raw, dylib, out)
-    print(f"[inject] -> {os.path.basename(out)}")
-    # raw IPA no longer needed — free the disk immediately
-    try: os.remove(raw)
-    except OSError: pass
-
     caption = build_caption(info, footer=footer)
-    # download the icon and turn it into a small JPEG thumbnail for the document
-    # (shown ON the file itself, like a premium post — one cohesive message).
+    # أيقونة صغيرة (thumbnail) على الملف — نفس الأيقونة لكل القنوات
     thumb = None
     if info.get("icon"):
         try:
@@ -152,11 +143,27 @@ def process(app_id, download_url=None, footer=None):
                 img = bg
             else:
                 img = img.convert("RGB")
-            # أيقونة صغيرة تُرفق بالملف نفسه (الشكل النظيف الفخم — رسالة واحدة، بلا صورة كبيرة)
             img.resize((320, 320), Image.LANCZOS).save(thumb, "JPEG", quality=90)
         except Exception as e:
             print("[thumb] skip:", e)
             thumb = None
+    return raw, caption, thumb, info, work
+
+
+def inject_app(raw_ipa, info, dylib_path, work):
+    """حقن دايلب محدّد وإخراج IPA جاهز للنشر (بوابة إلزامية: لا نشر بلا حقن)."""
+    out = os.path.join(work, clean_name(info.get("name"), info.get("version", "")))
+    injector.main(raw_ipa, dylib_path, out)
+    print(f"[inject] {os.path.basename(dylib_path)} -> {os.path.basename(out)}")
+    return out
+
+
+def process(app_id, download_url=None, footer=None):
+    """مسار مبسّط (للاستخدام اليدوي/CLI): تحميل + حقن بالدايلب الافتراضي + إرجاع الملف."""
+    raw, caption, thumb, info, work = prepare(app_id, download_url, footer=footer)
+    out = inject_app(raw, info, os.environ.get("DYLIB_PATH", "fixipa.dylib"), work)
+    try: os.remove(raw)
+    except OSError: pass
     return out, caption, thumb, info
 
 if __name__ == "__main__":

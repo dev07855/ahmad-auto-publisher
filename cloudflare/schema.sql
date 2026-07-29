@@ -56,7 +56,8 @@ CREATE TABLE IF NOT EXISTS channels (
   name     TEXT,                    -- عنوان القناة
   username TEXT,                    -- @username إن وُجد (أضمن للنشر)
   enabled  INTEGER DEFAULT 0,       -- 0 = مكتشفة/موقوفة | 1 = مفعّلة
-  added_at INTEGER
+  added_at INTEGER,
+  dylib    TEXT                     -- دايلب خاص بالقناة (NULL = الافتراضي العام dylib_active)
 );
 
 -- ربط القنوات بالأقسام (متعدّد لمتعدّد): قناة تنشر قسماً إن وُجد الصف
