@@ -136,10 +136,11 @@ async function dylibsView(env) {
   const active = await getSetting(env, 'dylib_active', '');
   const kb = rows.map(r => [
     { text: `${r.name === active ? '✅' : '⬜️'} ${r.name}`, callback_data: `dyl_${r.id}` },
+    { text: '✏️', callback_data: `dylren_${r.id}` },
     { text: '🗑️', callback_data: `dyldel_${r.id}` },
   ]);
   const text = rows.length
-    ? '<b>📎 الدايلب</b>\nالفعّال ✅ يُحقن بكل التطبيقات. اضغط اسماً ليصير الفعّال، أو 🗑️ للحذف.\n\n<i>لإضافة: أرسل ملف .dylib هنا.</i>'
+    ? '<b>📎 الدايلب</b>\nالفعّال ✅ يُحقن بكل التطبيقات.\n• اضغط الاسم ← يصير الفعّال\n• ✏️ ← إعادة تسمية\n• 🗑️ ← حذف\n\n<i>لإضافة: أرسل ملف .dylib هنا.</i>'
     : '<b>📎 الدايلب</b>\n\nما فيه دايلبات بعد.\n\n<i>أرسل ملف .dylib للبوت هنا وبيتخزّن باسمه ويصير الفعّال.</i>';
   return { text, kb };
 }
@@ -499,10 +500,25 @@ async function handleCallback(env, cq) {
   // قائمة الأقسام (تعديل/تفعيل/حذف/إضافة)
   if (data === 'secs') {
     const secs = await loadSections(env, false);
+    const pages = parseInt(await getSetting(env, 'scan_pages', '3'), 10) || 3;
     const kb = secs.map(s => [{ text: `${s.enabled ? '' : '⛔️ '}${s.name}: ${s.quota}/ساعة`, callback_data: `sec_${s.key}` }]);
     kb.push([{ text: '➕ أضف قسم', callback_data: 'addsec' }]);
+    kb.push([{ text: `📄 صفحات المسح لكل قسم: ${pages}`, callback_data: 'pages' }]);
     kb.push(...back);
-    return edit('<b>🔢 الأقسام والأعداد</b>\nاختر قسماً لتعديله، أو أضف قسماً جديداً:', kb);
+    return edit('<b>🔢 الأقسام والأعداد</b>\nاختر قسماً لتعديله، أو أضف قسماً، أو اضبط عدد صفحات المسح:', kb);
+  }
+  if (data === 'pages') {
+    const pages = parseInt(await getSetting(env, 'scan_pages', '3'), 10) || 3;
+    const opts = [1, 2, 3, 5, 7, 10];
+    const kb = [opts.map(n => ({ text: `${n === pages ? '✅ ' : ''}${n}`, callback_data: `setpages_${n}` }))];
+    kb.push([{ text: '⬅️ الأقسام', callback_data: 'secs' }]);
+    return edit(`<b>📄 صفحات المسح</b>\nكم صفحة يسحب من كل تصنيف؟ (الحالي: ${pages})\n\nأكثر صفحات = تطبيقات أقدم أكثر توصل للطابور، بس المسح يصير أبطأ.`, kb);
+  }
+  const spm = data.match(/^setpages_(\d+)$/);
+  if (spm) {
+    const n = Math.min(20, Math.max(1, parseInt(spm[1], 10)));
+    await setSetting(env, 'scan_pages', String(n));
+    return edit(`✅ صار يسحب <b>${n}</b> ${n === 1 ? 'صفحة' : 'صفحات'} من كل قسم (يبدأ بالمسح الجاي).`, [[{ text: '⬅️ الأقسام', callback_data: 'secs' }]]);
   }
   // إدارة قسم محدد
   const secm = data.match(/^sec_([a-z0-9]+)$/);
@@ -679,6 +695,13 @@ async function handleCallback(env, cq) {
     const v = await dylibsView(env);
     return edit(v.text, [...v.kb, ...back]);
   }
+  const dylrenm = data.match(/^dylren_(\d+)$/);
+  if (dylrenm) {
+    const r = await env.DB.prepare('SELECT name FROM dylibs WHERE rowid=?').bind(dylrenm[1]).first();
+    if (!r) return edit('⚠️ الدايلب ما عاد موجوداً.', [[{ text: '⬅️ الدايلب', callback_data: 'dylibs' }]]);
+    await setSetting(env, 'await', 'dylren:' + dylrenm[1]);
+    return edit(`✏️ أرسل الاسم الجديد للدايلب «${H(r.name)}»:`, [[{ text: '⬅️ الدايلب', callback_data: 'dylibs' }]]);
+  }
   const dyldelm = data.match(/^dyldel_(\d+)$/);
   if (dyldelm) {
     const r = await env.DB.prepare('SELECT name FROM dylibs WHERE rowid=?').bind(dyldelm[1]).first();
@@ -801,6 +824,25 @@ async function handleMessage(env, msg) {
     owners.push(text);
     await setOwners(env, owners);
     return reply(`✅ أُضيف المالك ${text}. صار يقدر يفتح البوت ويتحكم.`);
+  }
+  // إعادة تسمية دايلب: ينقل الملف بمخزن KV للاسم الجديد + يحدّث الفعّال والقنوات المرتبطة
+  if (awaiting.startsWith('dylren:')) {
+    await setSetting(env, 'await', '');
+    const rid = awaiting.slice(7);
+    const row = await env.DB.prepare('SELECT name FROM dylibs WHERE rowid=?').bind(rid).first();
+    if (!row) return reply('❌ الدايلب ما عاد موجوداً.');
+    let newName = text.trim();
+    if (!newName || newName.length > 60) return reply('❌ اسم غير صالح (1–60 حرف).');
+    if (!/\.dylib$/i.test(newName)) newName += '.dylib';
+    if (newName === row.name) return reply('ℹ️ نفس الاسم الحالي.');
+    const clash = await env.DB.prepare('SELECT 1 FROM dylibs WHERE name=? AND rowid<>?').bind(newName, rid).first();
+    if (clash) return reply('❌ فيه دايلب ثاني بنفس الاسم.');
+    const data = await env.DYLIBS.get(row.name, 'arrayBuffer');
+    if (data) { await env.DYLIBS.put(newName, data); await env.DYLIBS.delete(row.name); }
+    await env.DB.prepare('UPDATE dylibs SET name=? WHERE rowid=?').bind(newName, rid).run();
+    if (await getSetting(env, 'dylib_active', '') === row.name) await setSetting(env, 'dylib_active', newName);
+    await env.DB.prepare('UPDATE channels SET dylib=? WHERE dylib=?').bind(newName, row.name).run();
+    return reply(`✅ صار اسمه «${newName}».`);
   }
   if (text.startsWith('فوتر:')) {
     await setSetting(env, 'footer', text.slice(5).trim());
@@ -1013,7 +1055,8 @@ export default {
     if (url.pathname === '/sections' && request.method === 'GET') {
       if (request.headers.get('x-secret') !== env.ENQUEUE_SECRET) return new Response('forbidden', { status: 403 });
       const secs = await loadSections(env, true);
-      return Response.json({ sections: secs.map(s => ({ key: s.key, path: s.path })) });
+      const pages = parseInt(await getSetting(env, 'scan_pages', '3'), 10) || 3;
+      return Response.json({ sections: secs.map(s => ({ key: s.key, path: s.path })), pages });
     }
 
     // الدايلب الفعّال (يسحبه العامل وقت الحقن بدل السر الثابت)

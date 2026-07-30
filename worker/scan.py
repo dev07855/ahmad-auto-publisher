@@ -17,16 +17,19 @@ FALLBACK_SECTIONS = [
     ("modded",  "/category/7"),
 ]
 
-def get_sections():
+def get_config():
+    """الأقسام + عدد صفحات المسح من العقل (يتحكم فيهما المالك من البوت)."""
     try:
         r = requests.get(os.environ["BRAIN_URL"].rstrip("/") + "/sections",
                          headers={"x-secret": os.environ["ENQUEUE_SECRET"]}, timeout=30)
         r.raise_for_status()
-        secs = [(s["key"], s["path"]) for s in r.json().get("sections", []) if s.get("path")]
-        return secs or FALLBACK_SECTIONS
+        j = r.json()
+        secs = [(s["key"], s["path"]) for s in j.get("sections", []) if s.get("path")]
+        pages = int(j.get("pages") or 0) or None
+        return (secs or FALLBACK_SECTIONS), pages
     except Exception as e:
-        print("get_sections failed, using fallback:", e)
-        return FALLBACK_SECTIONS
+        print("get_config failed, using fallback:", e)
+        return FALLBACK_SECTIONS, None
 
 def scan_section(a, path, limit, pages):
     """يمسح صفحات القسم 1..pages (النمط ?page=N)، ويقف عند أول صفحة فاضية."""
@@ -60,10 +63,11 @@ def main():
     ok, msg = a.login(os.environ["AHMAD_EMAIL"], os.environ["AHMAD_PASSWORD"])
     if not ok:
         print("login failed:", msg); sys.exit(1)
+    sections, pages_cfg = get_config()                 # الأقسام + الصفحات من العقل
     limit = int(os.environ.get("SCAN_LIMIT") or os.environ.get("SECTION_LIMIT") or "60")
-    pages = int(os.environ.get("SCAN_PAGES") or "3")   # عدد صفحات كل قسم (قابل للضبط)
+    pages = pages_cfg or int(os.environ.get("SCAN_PAGES") or "3")   # من البوت، وإلا env، وإلا 3
     total = 0
-    for section, path in get_sections():
+    for section, path in sections:
         try:
             apps = scan_section(a, path, limit, pages)
         except Exception as e:
