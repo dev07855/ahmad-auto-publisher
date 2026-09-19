@@ -11,8 +11,9 @@ CREATE TABLE IF NOT EXISTS queue (
   added_at      INTEGER,                     -- وقت الإدخال (unix)
   status        TEXT    DEFAULT 'pending',   -- pending | processing | failed
   processing_at INTEGER DEFAULT 0,           -- وقت بدء المعالجة (لاسترجاع العالق)
-  section       TEXT    DEFAULT 'updates',   -- مفتاح القسم (يطابق sections.key)
-  attempts      INTEGER DEFAULT 0            -- عدّاد محاولات الفشل (3 = failed)
+  section       TEXT    DEFAULT 'games',     -- مفتاح القسم (يطابق sections.key)
+  attempts      INTEGER DEFAULT 0,           -- عدّاد محاولات الفشل (3 = failed)
+  meta          TEXT                         -- JSON: {description, icon, size, bundle} للمنشور
 );
 CREATE INDEX IF NOT EXISTS idx_queue_pick ON queue(status, rank, added_at);
 
@@ -90,10 +91,10 @@ INSERT OR IGNORE INTO settings (key,value) VALUES
   ('footer',''),
   ('paused_until','0');
 
--- الأقسام الافتراضية (5 أقسام: تحديثات + ألعاب + تصاميم + معدلة + مشاهدة)
+-- الأقسام الافتراضية (تصنيفات CheckOver؛ path = uuid التصنيف)
 INSERT OR IGNORE INTO sections (key,name,path,quota,enabled,ord) VALUES
-  ('updates','🔄 التحديثات','/last-app-update',5,1,0),
-  ('games',  '🎮 الألعاب',  '/category/6',    5,1,1),
-  ('design', '🎨 التصاميم', '/category/9',    5,1,2),
-  ('modded', '🧰 المعدلة',  '/category/7',    5,1,3),
-  ('cat11',  '📺 المشاهدة', '/category/11',   2,1,4);
+  ('games',  '🎮 الألعاب',   '9c60f563-1983-42f0-8882-a26207bd4aaf', 5,1,0),
+  ('apps',   '📱 التطبيقات', '9c60f57f-b2be-49b8-be17-aa0231a3ec50', 5,1,1),
+  ('design', '🎨 التصاميم',  '9c65babe-44ec-41f4-b452-98e8f4649479', 5,1,2),
+  ('paid',   '💰 المدفوعة',  '9c65bb1e-afb0-427b-8811-547ae30dd6a7', 5,1,3),
+  ('ai',     '🤖 الذكاء',    '9d0e57a6-7eee-4020-a849-fa501b874c81', 3,1,4);

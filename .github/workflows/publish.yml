@@ -22,8 +22,6 @@ jobs:
       - name: process & publish
         working-directory: worker
         env:
-          AHMAD_EMAIL: ${{ secrets.AHMAD_EMAIL }}
-          AHMAD_PASSWORD: ${{ secrets.AHMAD_PASSWORD }}
           DYLIB_PATH: fixipa.dylib
           TG_API_ID: ${{ secrets.TG_API_ID }}
           TG_API_HASH: ${{ secrets.TG_API_HASH }}
@@ -37,4 +35,7 @@ jobs:
           DL: ${{ github.event.client_payload.download_url }}
           FOOTER: ${{ github.event.client_payload.footer }}
           GROUPS: ${{ toJSON(github.event.client_payload.groups) }}
+          APP_NAME: ${{ github.event.client_payload.name }}
+          APP_VERSION: ${{ github.event.client_payload.version }}
+          META: ${{ toJSON(github.event.client_payload.meta) }}
         run: python run_publish.py

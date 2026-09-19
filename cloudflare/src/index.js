@@ -83,6 +83,8 @@ async function dispatchWorker(env, app, footer, groups) {
     body: JSON.stringify({ event_type: 'publish_app', client_payload: {
       app_id: app.app_id, download_url: app.download_url, footer: footer || '',
       groups: groups || [],   // [{dylib, channels}] — العامل يحقن لكل مجموعة (toJSON بالورك فلو)
+      name: app.name || '', version: app.version || '',
+      meta: (() => { try { return JSON.parse(app.meta || '{}'); } catch { return {}; } })(),  // وصف/أيقونة/حجم للمنشور
     } }),
   });
   return res.ok;
@@ -164,19 +166,18 @@ async function handleMyChatMember(env, upd) {
 }
 
 // ---------- المنطق الأساسي: الطابور ----------
-const isValidDL = (u) => typeof u === 'string' && u.startsWith('https://ahmad-up.com/download/link/');
-const isValidId = (v) => /^\d+$/.test(String(v));
+const isValidDL = (u) => typeof u === 'string' && u.startsWith('https://check0ver.net/');
+const isValidId = (v) => /^[A-Za-z0-9-]{6,64}$/.test(String(v));   // uuid تطبيق CheckOver
 
-// فهرس أقسام موقع أحمد المتاحة للإضافة (name يظهر بالبوت والقناة)
+// فهرس تصنيفات CheckOver المتاحة للإضافة (key = مفتاح القسم، id = uuid التصنيف)
 const CATALOG = [
-  { id: '6', name: '🎮 الألعاب' },
-  { id: '7', name: '🧰 المعدلة' },
-  { id: '8', name: '💰 المدفوعة' },
-  { id: '9', name: '🎨 التصاميم' },
-  { id: '10', name: '⚙️ الجلبريك' },
-  { id: '11', name: '📺 المشاهدة' },
-  { id: '13', name: '🕌 الإسلامية' },
-  { id: '15', name: '🌍 Fake GPS' },
+  { key: 'games',  id: '9c60f563-1983-42f0-8882-a26207bd4aaf', name: '🎮 الألعاب' },
+  { key: 'apps',   id: '9c60f57f-b2be-49b8-be17-aa0231a3ec50', name: '📱 التطبيقات' },
+  { key: 'paid',   id: '9c65bb1e-afb0-427b-8811-547ae30dd6a7', name: '💰 المدفوعة' },
+  { key: 'design', id: '9c65babe-44ec-41f4-b452-98e8f4649479', name: '🎨 التصاميم' },
+  { key: 'ai',     id: '9d0e57a6-7eee-4020-a849-fa501b874c81', name: '🤖 الذكاء الاصطناعي' },
+  { key: 'movies', id: '9c65baf5-009e-40a0-837c-355a4d5822f1', name: '🎬 أفلام ومسلسلات' },
+  { key: 'social', id: '9c65ba8d-2d83-48aa-91e5-459dd84b2651', name: '💬 تواصل اجتماعي' },
 ];
 
 // الأقسام أصبحت ديناميكية (جدول sections) — تُدار بالكامل من البوت
@@ -193,8 +194,8 @@ async function sectionExists(env, key) {
 }
 
 async function enqueueApps(env, section, apps) {
-  // apps: [{id, name, version, download_url, rank}] بترتيب صفحة القسم (rank=0 أعلى)
-  if (!(await sectionExists(env, section))) section = 'updates';
+  // apps: [{id, name, version, download_url, rank, meta}] بترتيب صفحة القسم (rank=0 أعلى)
+  if (!(await sectionExists(env, section))) section = 'games';
   if (!Array.isArray(apps)) return 0;
   let added = 0;
   for (const a of apps) {
@@ -210,9 +211,9 @@ async function enqueueApps(env, section, apps) {
     const ex = await env.DB.prepare('SELECT status, version FROM queue WHERE app_id=?').bind(a.id).first();
     if (ex) {
       if (ex.status === 'pending') {
-        // حدّث بيانات pending فقط دون تغيير ترتيبه أو قسمه
-        await env.DB.prepare('UPDATE queue SET version=?, download_url=?, name=? WHERE app_id=? AND status=?')
-          .bind(ver, a.download_url, a.name || '', a.id, 'pending').run();
+        // حدّث بيانات pending فقط دون تغيير ترتيبه أو قسمه (رابط التحميل الطازج + البيانات)
+        await env.DB.prepare('UPDATE queue SET version=?, download_url=?, name=?, meta=? WHERE app_id=? AND status=?')
+          .bind(ver, a.download_url, a.name || '', JSON.stringify(a.meta || {}), a.id, 'pending').run();
         continue;
       }
       // فشل سابقاً لكن نزل إصدار جديد → امنحه فرصة جديدة (احذف صف الفشل واتركه يُدرج من جديد)
@@ -222,8 +223,8 @@ async function enqueueApps(env, section, apps) {
         continue;  // قيد المعالجة، أو نفس النسخة الفاشلة → تجاهل
       }
     }
-    await env.DB.prepare('INSERT INTO queue(app_id,name,version,download_url,rank,added_at,status,section) VALUES(?,?,?,?,?,?,?,?)')
-      .bind(a.id, a.name || '', ver, a.download_url, a.rank ?? 9999, nowSec(), 'pending', section).run();
+    await env.DB.prepare('INSERT INTO queue(app_id,name,version,download_url,rank,added_at,status,section,meta) VALUES(?,?,?,?,?,?,?,?,?)')
+      .bind(a.id, a.name || '', ver, a.download_url, a.rank ?? 9999, nowSec(), 'pending', section, JSON.stringify(a.meta || {})).run();
     added++;
   }
   if (added) await logEvent(env, 'info', `${await sectionName(env, section)}: أُضيف ${added}`);
@@ -389,7 +390,7 @@ async function handleCallback(env, cq) {
     kb.push(...back);
     return edit('<b>🚀 نشر فوري</b>\nاضغط التطبيق اللي تبي تنشره الحين (يتخطّى الدور):', kb);
   }
-  const pn = data.match(/^pub_(\d+)$/);
+  const pn = data.match(/^pub_([A-Za-z0-9-]+)$/);
   if (pn) {
     const id = pn[1];
     const app = await env.DB.prepare("SELECT * FROM queue WHERE app_id=? AND status='pending'").bind(id).first();
@@ -409,7 +410,7 @@ async function handleCallback(env, cq) {
   }
 
   // حظر فوري من زر تنبيه التخطّي (بالاسم)
-  const bk = data.match(/^blk_(\d+)$/);
+  const bk = data.match(/^blk_([A-Za-z0-9-]+)$/);
   if (bk) {
     const id = bk[1];
     const q = await env.DB.prepare('SELECT name FROM queue WHERE app_id=?').bind(id).first();
@@ -532,7 +533,7 @@ async function handleCallback(env, cq) {
       [{ text: '✏️ رقم مخصّص', callback_data: `numsec_${key}` }],
       [{ text: s.enabled ? '⛔️ إيقاف القسم' : '✅ تفعيل القسم', callback_data: `toggsec_${key}` }],
     ];
-    if (key !== 'updates') kb.push([{ text: '🗑️ حذف القسم', callback_data: `delsec_${key}` }]);
+    kb.push([{ text: '🗑️ حذف القسم', callback_data: `delsec_${key}` }]);
     kb.push([{ text: '⬅️ الأقسام', callback_data: 'secs' }]);
     return edit(`<b>${s.name}</b>\nالعدد الحالي: ${s.quota}/ساعة\nاختر رقماً، أو «✏️ رقم مخصّص» لأي رقم:`, kb);
   }
@@ -554,9 +555,9 @@ async function handleCallback(env, cq) {
     await env.DB.prepare('UPDATE sections SET enabled=1-enabled WHERE key=?').bind(tg2[1]).run();
     const p = await panelMain(env); return edit(p.text, p.kb);
   }
-  // حذف قسم (عدا التحديثات) + إزالة تطبيقاته المنتظرة
+  // حذف قسم + إزالة تطبيقاته المنتظرة
   const dl = data.match(/^delsec_([a-z0-9]+)$/);
-  if (dl && dl[1] !== 'updates' && await sectionExists(env, dl[1])) {
+  if (dl && await sectionExists(env, dl[1])) {
     await env.DB.prepare('DELETE FROM sections WHERE key=?').bind(dl[1]).run();
     await env.DB.prepare("DELETE FROM queue WHERE section=? AND status='pending'").bind(dl[1]).run();
     const p = await panelMain(env); return edit('🗑️ حُذف القسم.', p.kb);
@@ -564,20 +565,20 @@ async function handleCallback(env, cq) {
   // إضافة قسم — أزرار جاهزة للأقسام المتاحة (اضغط بس، بلا كتابة)
   if (data === 'addsec') {
     const existingPaths = new Set((await loadSections(env, false)).map(s => s.path));
-    const avail = CATALOG.filter(c => !existingPaths.has(`/category/${c.id}`));
+    const avail = CATALOG.filter(c => !existingPaths.has(c.id));   // path = uuid التصنيف
     if (!avail.length) return edit('<b>➕ أضف قسم</b>\n\nكل الأقسام مُضافة بالفعل ✅', [[{ text: '⬅️ الأقسام', callback_data: 'secs' }]]);
-    const kb = avail.map(c => [{ text: `${c.name}`, callback_data: `addcat_${c.id}` }]);
+    const kb = avail.map(c => [{ text: `${c.name}`, callback_data: `addcat_${c.key}` }]);
     kb.push([{ text: '⬅️ الأقسام', callback_data: 'secs' }]);
     return edit('<b>➕ أضف قسم</b>\nاضغط القسم اللي تبي تضيفه (٥/ساعة افتراضياً، غيّره بعدها):', kb);
   }
   // تنفيذ الإضافة بضغطة
-  const ac = data.match(/^addcat_(\d+)$/);
+  const ac = data.match(/^addcat_([a-z]+)$/);
   if (ac) {
-    const c = CATALOG.find(x => x.id === ac[1]);
+    const c = CATALOG.find(x => x.key === ac[1]);
     if (c) {
       const ord = ((await env.DB.prepare('SELECT MAX(ord) mx FROM sections').first()).mx || 0) + 1;
       await env.DB.prepare('INSERT OR REPLACE INTO sections(key,name,path,quota,enabled,ord) VALUES(?,?,?,?,1,?)')
-        .bind('cat' + c.id, c.name, `/category/${c.id}`, 5, ord).run();
+        .bind(c.key, c.name, c.id, 5, ord).run();   // path = uuid التصنيف
     }
     const p = await panelMain(env); return edit('✅ أُضيف القسم (سيبدأ بالمسح التالي).', p.kb);
   }
@@ -854,14 +855,14 @@ async function handleMessage(env, msg) {
     await env.DB.prepare('DELETE FROM queue WHERE app_id=?').bind(id).run();
     return tg(env, 'sendMessage', { chat_id: msg.chat.id, text: `🚫 حُظر التطبيق ${id}.` });
   }
-  // إضافة قسم: «قسم <رقم الكاتيجري> <الاسم> [العدد]»
-  let m = text.match(/^قسم\s+(\d+)\s+(.+?)(?:\s+(\d+))?$/);
+  // إضافة قسم: «قسم <uuid التصنيف> <الاسم> [العدد]»
+  let m = text.match(/^قسم\s+([a-f0-9-]{8,})\s+(.+?)(?:\s+(\d+))?$/i);
   if (m) {
-    const catId = m[1], name = m[2].trim(), quota = safeCount(m[3], 5);
-    const key = 'cat' + catId;
+    const catUuid = m[1], name = m[2].trim(), quota = safeCount(m[3], 5);
+    const key = 'c' + catUuid.replace(/-/g, '').slice(0, 8);
     const ord = ((await env.DB.prepare('SELECT MAX(ord) mx FROM sections').first()).mx || 0) + 1;
     await env.DB.prepare('INSERT OR REPLACE INTO sections(key,name,path,quota,enabled,ord) VALUES(?,?,?,?,1,?)')
-      .bind(key, `📦 ${name}`, `/category/${catId}`, quota, ord).run();
+      .bind(key, `📦 ${name}`, catUuid, quota, ord).run();
     return tg(env, 'sendMessage', { chat_id: msg.chat.id, text: `✅ أُضيف قسم «${name}» (${quota}/ساعة). سيبدأ بالمسح التالي.` });
   }
   // عدد مخصّص لقسم: «عدد <key> <رقم>»

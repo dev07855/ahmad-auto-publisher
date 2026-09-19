@@ -40,6 +40,18 @@ def run():
     app_id = os.environ["APP_ID"]
     dl = os.environ.get("DL") or None
     footer = os.environ.get("FOOTER") or None
+    # بيانات التطبيق للمنشور (يمرّرها العقل من الماسح)
+    try:
+        meta = json.loads(os.environ.get("META") or "{}")
+    except Exception:
+        meta = {}
+    info = {
+        "name": os.environ.get("APP_NAME") or meta.get("name") or "",
+        "version": os.environ.get("APP_VERSION") or meta.get("version") or "",
+        "description": meta.get("description", ""),
+        "icon": meta.get("icon", ""),
+        "size": meta.get("size", ""),
+    }
     # المجموعات (dylib → channels)؛ احتياطي: القناة الرئيسية بالدايلب الفعّال
     try:
         groups = json.loads(os.environ.get("GROUPS") or "[]")
@@ -51,7 +63,7 @@ def run():
 
     workdir = None
     try:
-        raw, caption, thumb, info, workdir = worker.prepare(app_id, dl, footer=footer)
+        raw, caption, thumb, info, workdir = worker.prepare(app_id, dl, info, footer=footer)
         published_any = False
         errors = []
         for g in groups:

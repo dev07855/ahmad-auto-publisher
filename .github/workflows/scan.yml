@@ -18,8 +18,8 @@ jobs:
       - run: pip install requests
       - working-directory: worker
         env:
-          AHMAD_EMAIL: ${{ secrets.AHMAD_EMAIL }}
-          AHMAD_PASSWORD: ${{ secrets.AHMAD_PASSWORD }}
+          CHECKOVER_USER: ${{ secrets.CHECKOVER_USER }}
+          CHECKOVER_PASS: ${{ secrets.CHECKOVER_PASS }}
           BRAIN_URL: ${{ secrets.BRAIN_URL }}
           ENQUEUE_SECRET: ${{ secrets.ENQUEUE_SECRET }}
           SCAN_LIMIT: '60'

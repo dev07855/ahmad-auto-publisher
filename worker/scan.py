@@ -1,24 +1,25 @@
 #!/usr/bin/env python3
 """
-الماسح: يسجّل دخول أحمد، يقرأ الأقسام الأربعة بالترتيب (فوق→تحت)، ويرسلها لعقل كلاودفلير.
-كل تطبيق يُوسم بقسمه. العقل يقرر الجديد (منع تكرار بالإصدار) ويعبّي طابور كل قسم.
+الماسح: يسجّل دخول CheckOver، يقرأ الأقسام (تصنيفات) بالترتيب (الأحدث تحديثاً أولاً)،
+ويرسلها لعقل كلاودفلير. كل تطبيق يحمل رابط تحميله الموقّع + بياناته الكاملة (meta) للمنشور.
 يعمل بجدول GitHub Actions كل بضع دقائق.
 
-Env: AHMAD_EMAIL, AHMAD_PASSWORD, BRAIN_URL, ENQUEUE_SECRET, SECTION_LIMIT(optional)
+Env: CHECKOVER_USER, CHECKOVER_PASS, BRAIN_URL, ENQUEUE_SECRET, SCAN_PAGES(optional)
+الأقسام تُقرأ من العقل: path = uuid التصنيف بـCheckOver.
 """
 import os, sys, requests
-from ahmad import Ahmad, BASE
+from checkover import CheckOver
 
-# الأقسام تُقرأ ديناميكياً من العقل (يديرها المالك من البوت)؛ وإن تعذّر، احتياطي ثابت.
+# احتياطي إن تعذّرت قراءة الأقسام من العقل (key, category_uuid)
 FALLBACK_SECTIONS = [
-    ("updates", "/last-app-update"),
-    ("games",   "/category/6"),
-    ("design",  "/category/9"),
-    ("modded",  "/category/7"),
+    ("games",  "9c60f563-1983-42f0-8882-a26207bd4aaf"),  # ألعاب
+    ("apps",   "9c60f57f-b2be-49b8-be17-aa0231a3ec50"),  # تطبيقات
+    ("design", "9c65babe-44ec-41f4-b452-98e8f4649479"),  # تصميم
+    ("paid",   "9c65bb1e-afb0-427b-8811-547ae30dd6a7"),  # مدفوعة
 ]
 
 def get_config():
-    """الأقسام + عدد صفحات المسح من العقل (يتحكم فيهما المالك من البوت)."""
+    """الأقسام (key, category_uuid) + عدد صفحات المسح من العقل."""
     try:
         r = requests.get(os.environ["BRAIN_URL"].rstrip("/") + "/sections",
                          headers={"x-secret": os.environ["ENQUEUE_SECRET"]}, timeout=30)
@@ -31,45 +32,51 @@ def get_config():
         print("get_config failed, using fallback:", e)
         return FALLBACK_SECTIONS, None
 
-def scan_section(a, path, limit, pages):
-    """يمسح صفحات القسم 1..pages (النمط ?page=N)، ويقف عند أول صفحة فاضية."""
+def scan_section(c, category_uuid, pages):
+    """يمسح صفحات القسم 1..pages (الأحدث تحديثاً أولاً)، يوقف عند صفحة فاضية."""
     apps, rank = [], 0
     for pg in range(1, pages + 1):
-        sep = '&' if '?' in path else '?'
-        url = BASE + path + (f"{sep}page={pg}" if pg > 1 else "")
         try:
-            r = a.s.get(url, timeout=30)
-            r.raise_for_status()
+            rows, meta = c.list_apps(category_uuid, pg)
         except Exception as e:
             print(f"  صفحة {pg} فشلت: {e}")
             break
-        rows = a.parse_listing(r.text, limit)
         if not rows:
-            break                       # صفحة فاضية = انتهت صفحات القسم
-        for row in rows:
-            item = {"id": row["id"], "download_url": row["download_url"], "rank": rank}
+            break
+        for a in rows:
+            uuid = a.get("uuid"); du = a.get("downloadURL")
+            if not uuid or not du:
+                continue  # بلا رابط (مجاني بلا ملف؟) → تجاهل
+            apps.append({
+                "id": uuid,
+                "name": a.get("name", ""),
+                "version": a.get("version", ""),
+                "download_url": du,
+                "rank": rank,
+                "meta": {
+                    "description": a.get("description", ""),
+                    "icon": a.get("image", ""),
+                    "size": a.get("size", ""),
+                    "bundle": a.get("bundle", ""),
+                },
+            })
             rank += 1
-            try:
-                info = a.app_info(row["id"])
-                item["name"] = info.get("name", "")
-                item["version"] = info.get("version", "")
-            except Exception:
-                pass
-            apps.append(item)
+        last = meta.get("last_page")
+        if last and pg >= last:
+            break
     return apps
 
 def main():
-    a = Ahmad()
-    ok, msg = a.login(os.environ["AHMAD_EMAIL"], os.environ["AHMAD_PASSWORD"])
+    c = CheckOver()
+    ok, msg = c.login(os.environ["CHECKOVER_USER"], os.environ["CHECKOVER_PASS"])
     if not ok:
-        print("login failed:", msg); sys.exit(1)
-    sections, pages_cfg = get_config()                 # الأقسام + الصفحات من العقل
-    limit = int(os.environ.get("SCAN_LIMIT") or os.environ.get("SECTION_LIMIT") or "60")
-    pages = pages_cfg or int(os.environ.get("SCAN_PAGES") or "3")   # من البوت، وإلا env، وإلا 3
+        print("checkover login failed:", msg); sys.exit(1)
+    sections, pages_cfg = get_config()
+    pages = pages_cfg or int(os.environ.get("SCAN_PAGES") or "3")
     total = 0
-    for section, path in sections:
+    for section, cat_uuid in sections:
         try:
-            apps = scan_section(a, path, limit, pages)
+            apps = scan_section(c, cat_uuid, pages)
         except Exception as e:
             print(f"scan {section} failed: {e}"); continue
         resp = requests.post(os.environ["BRAIN_URL"].rstrip("/") + "/enqueue",
