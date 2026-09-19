@@ -33,23 +33,37 @@ def main(ipa_in, dylib, ipa_out):
         if not os.path.isfile(exe_path):
             raise RuntimeError(f"main executable '{exe}' not found in app bundle")
 
-        # 1) copy dylib to .app root, named after its install-id basename
+        # دايلبات البرandة (المصدر) اللي نشيلها قبل حقن دايلبنا — يبقى الهاك والفريمويركات
+        strip = set(x.strip() for x in os.environ.get(
+            "STRIP_DYLIBS", "Check0verPlus.dylib").split(",") if x.strip())
+
+        # 1) copy our dylib to .app root, named after its install-id basename
         dyl_name = "ThamerScreen.dylib"
         dst = os.path.join(app, dyl_name)
         shutil.copy(dylib, dst)
         os.chmod(dst, 0o644)
 
-        # 2) add a weak LC_LOAD_DYLIB (@executable_path) to every arch slice
+        # 2) بكل شريحة: احذف أوامر تحميل دايلبات البرandة، ثم أضف أمر تحميل دايلبنا (weak)
         load_path = f"@executable_path/{dyl_name}"
         binary = lief.MachO.parse(exe_path)
         slices = [binary.at(i) for i in range(binary.size)] if hasattr(binary, "size") else [binary]
-        added = False
+        added = False; removed = 0
         for b in slices:
+            for lib in list(b.libraries):                       # نسخة للتكرار الآمن أثناء الحذف
+                if lib.name.split('/')[-1] in strip:
+                    b.remove(lib); removed += 1
             if load_path not in [c.name for c in b.libraries]:
                 b.add(lief.MachO.DylibCommand.weak_lib(load_path))
                 added = True
         binary.write(exe_path)
         os.chmod(exe_path, 0o755)
+
+        # احذف ملفات دايلبات البرandة نفسها من جذر التطبيق
+        for name in strip:
+            p = os.path.join(app, name)
+            if os.path.isfile(p):
+                os.remove(p)
+                print(f"[strip] removed {name}")
 
         # 3) repackage (preserve tree; symlinks are rare in IPAs and re-signing handles the rest)
         if os.path.exists(ipa_out):
@@ -60,7 +74,7 @@ def main(ipa_in, dylib, ipa_out):
                 for fn in files:
                     fp = os.path.join(root, fn)
                     z.write(fp, os.path.relpath(fp, work))
-        print(f"OK injected={added} exe={exe} -> {ipa_out}")
+        print(f"OK stripped={removed} injected={added} exe={exe} -> {ipa_out}")
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
