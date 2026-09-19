@@ -329,6 +329,17 @@ function fmtDur(sec) {
   return m >= 60 ? `${Math.round(m / 60)} ساعة` : `${m} دقيقة`;
 }
 
+// الواجهة الأولى: اختيار القناة (زر لكل قناة) + الإعدادات العامة — زي «اختر المتجر»
+async function panelHome(env) {
+  const chans = (await env.DB.prepare('SELECT chat_id, name, enabled FROM channels ORDER BY added_at ASC').all()).results || [];
+  const kb = chans.map(c => [{ text: `${c.enabled ? '🟢' : '⚪️'} ${c.name || c.chat_id}`, callback_data: `ch_${c.chat_id}` }]);
+  kb.push([{ text: '⚙️ الإعدادات العامة', callback_data: 'global' }]);
+  kb.push([{ text: '🔄 تحديث', callback_data: 'home' }]);
+  const note = chans.length ? 'اختر القناة اللي تبي تديرها 👇' : 'ما فيه قنوات بعد — خلِّ البوت مشرفاً بقناتك وترجع هنا.';
+  const text = `<b>🗂️ اختر القناة</b>\n\n${note}\n\n<i>كل قناة لها لوحتها الخاصة (أقسامها، دايلبها، تنبيهاتها). و«⚙️ الإعدادات العامة» للتحكّم بالنظام كله.</i>`;
+  return { text, kb };
+}
+
 async function panelMain(env) {
   const enabled = await getSetting(env, 'enabled', '1') === '1';
   const pausedUntil = parseInt(await getSetting(env, 'paused_until', '0'), 10) || 0;
@@ -367,7 +378,7 @@ async function panelMain(env) {
     [{ text: '🚫 القائمة السوداء', callback_data: 'black' }, { text: '✍️ الفوتر', callback_data: 'footer' }],
     [{ text: '📢 القنوات', callback_data: 'channels' }, { text: '📎 الدايلب', callback_data: 'dylibs' }],
     [{ text: '👤 الملّاك', callback_data: 'owners' }, { text: '📖 دليل الاستخدام', callback_data: 'guide' }],
-    [{ text: '🔄 تحديث', callback_data: 'home' }],
+    [{ text: '⬅️ اختر القناة', callback_data: 'home' }, { text: '🔄 تحديث', callback_data: 'global' }],
   ];
   return { text, kb };
 }
@@ -381,9 +392,10 @@ async function handleCallback(env, cq) {
     chat_id: chatId, message_id: msgId, text, parse_mode: 'HTML',
     reply_markup: { inline_keyboard: kb }, disable_web_page_preview: true,
   });
-  const back = [[{ text: '⬅️ رجوع', callback_data: 'home' }]];
+  const back = [[{ text: '⬅️ رجوع', callback_data: 'global' }]];
 
-  if (data === 'home') { const p = await panelMain(env); return edit(p.text, p.kb); }
+  if (data === 'home') { const p = await panelHome(env); return edit(p.text, p.kb); }      // اختيار القناة
+  if (data === 'global') { const p = await panelMain(env); return edit(p.text, p.kb); }     // الإعدادات العامة
 
   // نشر فوري: اعرض تطبيقات الطابور بالاسم (أزرار) — اضغط واحداً ليُنشر الآن متخطياً الدور
   if (data === 'pubnow') {
@@ -776,7 +788,7 @@ async function handleMessage(env, msg) {
   const reply = (t) => tg(env, 'sendMessage', { chat_id: msg.chat.id, text: t });
   if (text === '/start' || text === '/panel' || text === 'لوحة' || text === '🧠 لوحتي') {
     await setSetting(env, 'await', '');  // أي ضغطة على اللوحة تلغي وضع الانتظار
-    const p = await panelMain(env);
+    const p = await panelHome(env);      // الواجهة الأولى = اختيار القناة
     // زر ثابت «🧠 لوحتي» يظهر جنب مربع الكتابة — اضغطه أي وقت بدل ما تكتب /start
     await tg(env, 'sendMessage', {
       chat_id: msg.chat.id, text: 'اضغط «🧠 لوحتي» أي وقت لفتح اللوحة.',
