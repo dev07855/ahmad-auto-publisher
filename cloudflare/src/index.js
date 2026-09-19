@@ -127,10 +127,11 @@ async function channelView(env, cid) {
   const subs = new Set(((await env.DB.prepare('SELECT section_key FROM channel_sections WHERE chat_id=?').bind(cid).all()).results || []).map(r => r.section_key));
   const kb = secs.map(s => [{ text: `${subs.has(s.key) ? '✅' : '⬜️'} ${s.name}`, callback_data: `chsec_${cid}_${s.key}` }]);
   kb.push([{ text: `📎 دايلب القناة: ${c.dylib || 'الافتراضي العام'}`, callback_data: `chdyl_${cid}` }]);
+  kb.push([{ text: `🔔 تنبيهات القناة لـ: ${c.owner || 'الكل'}`, callback_data: `chown_${cid}` }]);
   kb.push([{ text: c.enabled ? '🔴 إيقاف القناة' : '🟢 تفعيل القناة', callback_data: `chtog_${cid}` }]);
   kb.push([{ text: '🗑️ حذف القناة', callback_data: `chdel_${cid}` }]);
   kb.push([{ text: '⬅️ القنوات', callback_data: 'channels' }]);
-  const text = `<b>${H(c.name || cid)}</b>\nالحالة: ${c.enabled ? '🟢 مفعّلة' : '⚪️ موقوفة'}\nالدايلب: ${H(c.dylib || 'الافتراضي العام')}\n\nاختر الأقسام اللي تنشر بهالقناة (✅ = تنشر فيها):`;
+  const text = `<b>${H(c.name || cid)}</b>\nالحالة: ${c.enabled ? '🟢 مفعّلة' : '⚪️ موقوفة'}\nالدايلب: ${H(c.dylib || 'الافتراضي العام')}\nتنبيهاتها لـ: ${H(c.owner || 'الكل')}\n\nاختر الأقسام اللي تنشر بهالقناة (✅ = تنشر فيها):`;
   return { text, kb };
 }
 
@@ -454,40 +455,20 @@ async function handleCallback(env, cq) {
   }
 
   if (data === 'subs') {
-    const subs = await getSubscriberCount(env);
-    if (subs == null) {
-      return edit('<b>👥 المشتركون</b>\n\n⚠️ تعذّر جلب العدد.\nتأكد أن البوت مشرف داخل القناة.', back);
+    const chans = (await env.DB.prepare('SELECT chat_id, name, username FROM channels WHERE enabled=1').all()).results || [];
+    if (!chans.length) return edit('<b>👥 المشتركون</b>\n\nما فيه قنوات مفعّلة.', [[{ text: '🔄 تحديث', callback_data: 'subs' }], ...back]);
+    const lines = [];
+    for (const c of chans) {
+      const cnt = await getSubscriberCount(env, c.username || c.chat_id);
+      if (cnt == null) { lines.push(`⚠️ ${H(c.name)}: تعذّر (تأكد البوت مشرف)`); continue; }
+      let hist = [];
+      try { hist = JSON.parse(await getSetting(env, 'subs_hist_' + c.chat_id, '[]')) || []; } catch { hist = []; }
+      const prev = hist.length ? hist[hist.length - 1].c : 0;
+      const g = prev ? cnt - prev : 0;
+      const arrow = !prev ? '' : g > 0 ? ` (+${g} ▲)` : g < 0 ? ` (${g} ▼)` : '';
+      lines.push(`👥 <b>${H(c.name)}</b>: ${cnt}${arrow}`);
     }
-    const hist = await recordSubsSnapshot(env, subs);   // سجّل اليوم أيضاً عند الضغط
-    const last7 = hist.slice(-7);
-    let body = `<b>👥 مشتركو القناة</b>\n\nالعدد الآن: <b>${subs}</b>`;
-    if (last7.length >= 2) {
-      const AR = ['الأحد', 'الإثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت'];
-      const counts = last7.map(e => e.c);
-      const mx = Math.max(...counts), mn = Math.min(...counts), span = Math.max(1, mx - mn);
-      let chart = '', prevC = null;
-      for (const e of last7) {
-        const filled = 1 + Math.round(((e.c - mn) / span) * 6);   // 1..7 مربّعات
-        const bar = '▓'.repeat(filled) + '░'.repeat(7 - filled);
-        const dow = AR[new Date(e.d + 'T12:00:00Z').getUTCDay()];
-        const delta = prevC == null ? '' : e.c > prevC ? ` +${e.c - prevC}` : e.c < prevC ? ` ${e.c - prevC}` : ' =';
-        chart += `${dow} ${bar} ${e.c}${delta}\n`;
-        prevC = e.c;
-      }
-      const weekGrow = counts[counts.length - 1] - counts[0];
-      body += `\n\n<b>آخر ${last7.length} أيام:</b>\n<pre>${chart}</pre>`;
-      body += `نمو الفترة: ${weekGrow >= 0 ? '+' : ''}${weekGrow} ${weekGrow > 0 ? '▲' : weekGrow < 0 ? '▼' : ''}`;
-      // 🔮 توقّع الوصول للمعلم القادم (كل 500) بمعدّل النمو الحالي
-      const avg = weekGrow / (last7.length - 1);
-      if (avg > 0.5) {
-        const next = (Math.floor(subs / 500) + 1) * 500;
-        const need = Math.ceil((next - subs) / avg);
-        body += `\n\n🔮 بهذا المعدل توصل ${next} خلال ~${need} يوم`;
-      }
-    } else {
-      body += `\n\n📈 بدأ التتبّع من اليوم — بتشوف النمو والرسم والتوقّع بعد يوم أو يومين.`;
-    }
-    return edit(body, [[{ text: '🔄 تحديث', callback_data: 'subs' }], ...back]);
+    return edit(`<b>👥 مشتركو قنواتك</b>\n\n${lines.join('\n')}`, [[{ text: '🔄 تحديث', callback_data: 'subs' }], ...back]);
   }
 
   if (data === 'report') {
@@ -686,6 +667,24 @@ async function handleCallback(env, cq) {
     for (const r of rows) kb.push([{ text: `${r.name === cur ? '✅' : '⬜️'} ${r.name}`, callback_data: `chdylset_${cid}_${r.id}` }]);
     kb.push([{ text: '⬅️ رجوع', callback_data: `ch_${cid}` }]);
     return edit('<b>📎 دايلب هذه القناة</b>\nاختر الدايلب المحقون بتطبيقات هالقناة:', kb);
+  }
+  const chownsetm = data.match(/^chownset_(-?\d+)_(\d+)$/);
+  if (chownsetm) {
+    const cid = chownsetm[1], oid = chownsetm[2];
+    await env.DB.prepare('UPDATE channels SET owner=? WHERE chat_id=?').bind(oid === '0' ? null : oid, cid).run();
+    const v = await channelView(env, cid);
+    return v ? edit(v.text, v.kb) : edit('⚠️ القناة ما عادت موجودة.', [[{ text: '⬅️ القنوات', callback_data: 'channels' }]]);
+  }
+  const chownm = data.match(/^chown_(-?\d+)$/);
+  if (chownm) {
+    const cid = chownm[1];
+    const me = String(cq.from.id);
+    const cr = await env.DB.prepare('SELECT owner FROM channels WHERE chat_id=?').bind(cid).first();
+    const cur = cr && cr.owner ? cr.owner : '';
+    const kb = [[{ text: `${!cur ? '✅' : '⬜️'} الكل (بلا تخصيص)`, callback_data: `chownset_${cid}_0` }]];
+    for (const o of await getOwners(env)) kb.push([{ text: `${o === cur ? '✅' : '⬜️'} ${o}${o === me ? ' (أنت)' : ''}`, callback_data: `chownset_${cid}_${o}` }]);
+    kb.push([{ text: '⬅️ رجوع', callback_data: `ch_${cid}` }]);
+    return edit('<b>🔔 مالك تنبيهات هذه القناة</b>\nمين توصله تنبيهاتها (مشتركين/معالم/هبوط)؟\n<i>«الكل» = توصل الاثنين.</i>', kb);
   }
   const chm = data.match(/^ch_(-?\d+)$/);
   if (chm) {
@@ -892,27 +891,36 @@ async function maybeDailySummary(env) {
   }
   const total = (await env.DB.prepare('SELECT COUNT(*) c FROM published WHERE published_day=?').bind(today).first()).c;
   const errs = (await env.DB.prepare("SELECT COUNT(*) c FROM log WHERE kind='error' AND ts >= ?").bind(nowSec() - 86400).first()).c;
-  // عدّاد المشتركين مع نمو اليوم (مقارنة بأمس)
-  let subsLine = '';
-  const subs = await getSubscriberCount(env);
-  if (subs != null) {
-    const prev = parseInt(await getSetting(env, 'subs_last', '0'), 10) || 0;
-    const diff = subs - prev;
-    const arrow = !prev ? '' : diff > 0 ? ` (+${diff} ▲)` : diff < 0 ? ` (${diff} ▼)` : ' (=)';
-    subsLine = `\n\n👥 مشتركوك: ${subs}${arrow}`;
-    await setSetting(env, 'subs_last', subs);
+  // عدّاد مشتركي كل قناة
+  let subsLines = [];
+  for (const c of ((await env.DB.prepare('SELECT chat_id,name,username FROM channels WHERE enabled=1').all()).results || [])) {
+    const cnt = await getSubscriberCount(env, c.username || c.chat_id);
+    if (cnt != null) subsLines.push(`👥 ${c.name}: ${cnt}`);
   }
+  const subsLine = subsLines.length ? '\n\n' + subsLines.join('\n') : '';
   await notifyOwners(env, `<b>📊 ملخص اليوم (${today})</b>\n\nنُشر إجمالاً: ${total}${subsLine}\n\n${lines.join('\n')}\n\n⚠️ أخطاء: ${errs}`);
 }
 
-// عدد مشتركي القناة (البوت لازم يكون مشرفاً فيها) — يرجّع null إذا تعذّر (يتخطّى بهدوء)
-async function getSubscriberCount(env) {
-  const channel = env.TG_CHANNEL || await getSetting(env, 'channel', '');
-  if (!channel) return null;
+// عدد مشتركي قناة محدّدة (ident = @username أو chat_id) — null إذا تعذّر
+async function getSubscriberCount(env, ident) {
+  ident = ident || env.TG_CHANNEL || await getSetting(env, 'channel', '');
+  if (!ident) return null;
   try {
-    const r = await tg(env, 'getChatMemberCount', { chat_id: channel });
+    const r = await tg(env, 'getChatMemberCount', { chat_id: ident });
     return (r && r.ok && typeof r.result === 'number') ? r.result : null;
   } catch { return null; }
+}
+
+// مالك قناة (telegram id) — للتوجيه؛ null = غير محدّد (يذهب لكل الملّاك)
+async function channelOwner(env, chatId) {
+  const r = await env.DB.prepare('SELECT owner FROM channels WHERE chat_id=?').bind(chatId).first();
+  return r && r.owner ? r.owner : null;
+}
+// تنبيه خاص بقناة: يذهب لمالكها فقط (إن حُدّد)، وإلا لكل الملّاك
+async function notifyChannelOwner(env, chatId, text, extra = {}) {
+  const o = await channelOwner(env, chatId);
+  if (o) await tg(env, 'sendMessage', { chat_id: o, parse_mode: 'HTML', text, ...extra });
+  else await notifyOwners(env, text, extra);
 }
 
 // سجّل عدد اليوم بالتاريخ (JSON بالإعدادات) — إدخال واحد/يوم، نحتفظ بآخر 30 يوماً
@@ -927,30 +935,41 @@ async function recordSubsSnapshot(env, count) {
   return hist;
 }
 
-// مراقبة يومية للمشتركين: تسجيل + تنبيه المعالم (كل 500) + تنبيه الهبوط (مرة/يوم)
+// مراقبة يومية للمشتركين — لكل قناة مفعّلة على حدة، والتنبيه يذهب لمالك القناة (أو الكل إن غير محدّد)
 async function maybeSubsWatch(env) {
   const today = ksaDay();
   if ((await getSetting(env, 'subs_watch_day', '')) === today) return;   // مرة واحدة باليوم
-  const count = await getSubscriberCount(env);
-  if (count == null) return;                                             // تعذّر — نعيد بكرة
-  await setSetting(env, 'subs_watch_day', today);
-  const hist = await recordSubsSnapshot(env, count);
-  const prevEntry = hist.filter(e => e.d !== today).slice(-1)[0];
-  const prev = prevEntry ? prevEntry.c : 0;
-  // 📉 تنبيه هبوط (نقص 10+ مشترك بيوم)
-  if (prev && (prev - count) >= 10) {
-    await notifyOwners(env, `📉 <b>تنبيه هبوط</b>\n\nنقص ${prev - count} مشترك اليوم (من ${prev} إلى ${count}).\nراجع آخر منشوراتك — قد يكون فيها ما أزعج المتابعين.`);
-  }
-  // 🎉 تنبيه المعالم (كل 500)
+  const chans = (await env.DB.prepare('SELECT chat_id, name, username FROM channels WHERE enabled=1').all()).results || [];
   const step = 500;
-  const lastM = parseInt(await getSetting(env, 'subs_milestone', '0'), 10) || 0;
-  const crossed = Math.floor(count / step) * step;
-  if (lastM === 0) {
-    await setSetting(env, 'subs_milestone', crossed);                   // خط أساس (بلا احتفال رجعي)
-  } else if (crossed > lastM) {
-    await setSetting(env, 'subs_milestone', crossed);
-    await notifyOwners(env, `🎉 <b>مبروك!</b>\n\nقناتك وصلت <b>${crossed}</b> مشترك 🚀\nاستمر — نموّك ممتاز!`);
+  let any = false;
+  for (const c of chans) {
+    const count = await getSubscriberCount(env, c.username || c.chat_id);
+    if (count == null) continue;
+    any = true;
+    // سجل تاريخي لكل قناة (مفتاح مستقل)
+    const hKey = 'subs_hist_' + c.chat_id;
+    let hist = [];
+    try { hist = JSON.parse(await getSetting(env, hKey, '[]')) || []; } catch { hist = []; }
+    const prevEntry = hist.filter(e => e.d !== today).slice(-1)[0];
+    const prev = prevEntry ? prevEntry.c : 0;
+    hist = hist.filter(e => e.d !== today); hist.push({ d: today, c: count }); hist = hist.slice(-30);
+    await setSetting(env, hKey, JSON.stringify(hist));
+    // 📉 هبوط
+    if (prev && (prev - count) >= 10) {
+      await notifyChannelOwner(env, c.chat_id, `📉 <b>هبوط بقناة ${H(c.name)}</b>\n\nنقص ${prev - count} مشترك اليوم (من ${prev} إلى ${count}).\nراجع آخر منشوراتك.`);
+    }
+    // 🎉 معلم (كل 500)
+    const mKey = 'subs_mile_' + c.chat_id;
+    const lastM = parseInt(await getSetting(env, mKey, '0'), 10) || 0;
+    const crossed = Math.floor(count / step) * step;
+    if (lastM === 0) {
+      await setSetting(env, mKey, crossed);                            // خط أساس بلا احتفال رجعي
+    } else if (crossed > lastM) {
+      await setSetting(env, mKey, crossed);
+      await notifyChannelOwner(env, c.chat_id, `🎉 <b>مبروك!</b>\n\nقناة ${H(c.name)} وصلت <b>${crossed}</b> مشترك 🚀`);
+    }
   }
+  if (any) await setSetting(env, 'subs_watch_day', today);
 }
 
 // تنبيه «النشر متوقف»: نظام يعمل + طابور فيه منتظرون + ما نُشر شي من 6 ساعات (مرة واحدة حتى يعود)
@@ -991,15 +1010,12 @@ async function maybeWeeklySummary(env) {
     if (c > topC) { topC = c; topName = s.name; }
   }
   const errs = (await env.DB.prepare("SELECT COUNT(*) c FROM log WHERE kind='error' AND ts >= ?").bind(nowSec() - 7 * 86400).first()).c;
-  let subsLine = '';
-  const subs = await getSubscriberCount(env);
-  if (subs != null) {
-    const prev = parseInt(await getSetting(env, 'subs_week_ago', '0'), 10) || 0;
-    const diff = subs - prev;
-    const arrow = !prev ? '' : diff > 0 ? ` (+${diff} ▲ هالأسبوع)` : diff < 0 ? ` (${diff} ▼ هالأسبوع)` : ' (=)';
-    subsLine = `\n\n👥 المشتركون: ${subs}${arrow}`;
-    await setSetting(env, 'subs_week_ago', subs);
+  let subsLines = [];
+  for (const c of ((await env.DB.prepare('SELECT chat_id,name,username FROM channels WHERE enabled=1').all()).results || [])) {
+    const cnt = await getSubscriberCount(env, c.username || c.chat_id);
+    if (cnt != null) subsLines.push(`👥 ${c.name}: ${cnt}`);
   }
+  const subsLine = subsLines.length ? '\n\n' + subsLines.join('\n') : '';
   await notifyOwners(env, `<b>🗓️ تقرير الأسبوع</b>\n\nنُشر إجمالاً: ${total}\nأنشط قسم: ${topName}${subsLine}\n\n${lines.join('\n')}\n\n⚠️ أخطاء الأسبوع: ${errs}`);
 }
 
