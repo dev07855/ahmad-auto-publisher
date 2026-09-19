@@ -40,6 +40,7 @@ def run():
     app_id = os.environ["APP_ID"]
     dl = os.environ.get("DL") or None
     footer = os.environ.get("FOOTER") or None
+    reactions = [e.strip() for e in (os.environ.get("REACTIONS") or "").split(",") if e.strip()]
     # بيانات التطبيق للمنشور (يمرّرها العقل من الماسح)
     try:
         meta = json.loads(os.environ.get("META") or "{}")
@@ -75,6 +76,7 @@ def run():
             try:
                 cfg = telegram.cfg_from_env()
                 cfg["channels"] = chans
+                cfg["reactions"] = reactions
                 telegram.publish(cfg, out, caption, thumb)
                 published_any = True
             except BaseException as e:

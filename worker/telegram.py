@@ -40,6 +40,21 @@ def _norm_chan(c):
     except ValueError:
         return c
 
+async def _react(client, chan, msg_id, emojis):
+    """يحط تفاعلات البوت على المنشور (دليل حيوية). يتخطّى بهدوء إن تعذّر."""
+    if not emojis:
+        return
+    from telethon.tl.functions.messages import SendReactionRequest
+    from telethon.tl.types import ReactionEmoji
+    reacts = [ReactionEmoji(emoticon=e) for e in emojis]
+    try:
+        await client(SendReactionRequest(peer=chan, msg_id=msg_id, reaction=reacts, add_to_recent=False))
+    except Exception:
+        try:  # بعض القنوات تسمح بتفاعل واحد فقط للحساب → جرّب الأول
+            await client(SendReactionRequest(peer=chan, msg_id=msg_id, reaction=reacts[:1], add_to_recent=False))
+        except Exception as e:
+            print("[react] skip:", e)
+
 async def _publish_once(cfg, ipa_path, caption, thumb):
     saved = _load_session(cfg) if cfg.get("brain") else ""
     client = TelegramClient(StringSession(saved), int(cfg["api_id"]), cfg["api_hash"])
@@ -58,17 +73,20 @@ async def _publish_once(cfg, ipa_path, caption, thumb):
 
         # رسالة واحدة نظيفة وفخمة: الملف (IPA) يحمل أيقونة التطبيق كصورة مصغّرة + الوصف تعليقاً.
         # يُرفع الملف مرة للقناة الأولى، ثم يُعاد استخدام نفس ملف تلقرام لباقي القنوات (بلا إعادة رفع).
+        emojis = cfg.get("reactions") or []
         first = await client.send_file(
             channels[0], ipa_path, caption=caption, parse_mode="html",
             force_document=True, thumb=thumb, part_size_kb=512,
             attributes=[DocumentAttributeFilename(fname)],
         )
+        await _react(client, channels[0], first.id, emojis)
         for chan in channels[1:]:
-            await client.send_file(
+            m = await client.send_file(
                 chan, first.media, caption=caption, parse_mode="html",
                 force_document=True,
                 attributes=[DocumentAttributeFilename(fname)],
             )
+            await _react(client, chan, m.id, emojis)
     finally:
         await client.disconnect()
 

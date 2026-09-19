@@ -72,6 +72,7 @@ async function notifyOwners(env, text, extra = {}) {
 
 // ---------- تشغيل عامل GitHub ----------
 async function dispatchWorker(env, app, footer, groups) {
+  const reactions = await getSetting(env, 'reactions', '🔥,❤️');   // تفاعلات البوت التلقائية (فارغ = إيقاف)
   const res = await fetch(`https://api.github.com/repos/${env.GH_REPO}/dispatches`, {
     method: 'POST',
     headers: {
@@ -85,6 +86,7 @@ async function dispatchWorker(env, app, footer, groups) {
       groups: groups || [],   // [{dylib, channels}] — العامل يحقن لكل مجموعة (toJSON بالورك فلو)
       name: app.name || '', version: app.version || '',
       meta: (() => { try { return JSON.parse(app.meta || '{}'); } catch { return {}; } })(),  // وصف/أيقونة/حجم للمنشور
+      reactions,   // تفاعلات تلقائية على المنشور
     } }),
   });
   return res.ok;
