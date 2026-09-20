@@ -39,4 +39,4 @@ jobs:
           APP_VERSION: ${{ github.event.client_payload.version }}
           META: ${{ toJSON(github.event.client_payload.meta) }}
           REACTIONS: ${{ github.event.client_payload.reactions }}
-        run: python run_publish.py
+        run: python -u run_publish.py

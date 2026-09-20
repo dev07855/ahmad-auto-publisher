@@ -14,7 +14,7 @@ Env (secrets):
   TG_API_ID, TG_API_HASH, TG_BOT_TOKEN, TG_CHANNEL
   CHANNEL_FOOTER (optional)             # branding footer appended to caption
 """
-import os, sys, re, html, tempfile
+import os, sys, re, html, tempfile, time
 import requests
 from checkover import clean_name
 import inject as injector
@@ -95,7 +95,11 @@ def build_caption(info, footer=None):
 TG_MAX_BYTES = 2_095_000_000  # حد تلقرام للرفع عبر البوت ≈ 2 جيجا
 
 def _download(url, dest, verify_ipa=True):
-    """تحميل مباشر لرابط CheckOver الموقّع (بلا دخول) مع فحص الحجم والسلامة."""
+    """تحميل مباشر لرابط CheckOver الموقّع (بلا دخول) مع فحص الحجم والسلامة.
+    سقف زمني: لو التحميل تعدّى DL_MAX_SEC (افتراضي 12د) نتخطّاه — لأن تشِك أوفر يخنق
+    التطبيقات الضخمة، فلا تخلص بمهلة الوظيفة (30د) وتسدّ أنبوب النشر على باقي القنوات."""
+    dl_max = int(os.environ.get("DL_MAX_SEC", "720"))
+    start = time.time()
     with requests.get(url, stream=True, timeout=180, headers={"User-Agent": UA}) as r:
         r.raise_for_status()
         total = int(r.headers.get("content-length", 0))
@@ -105,6 +109,9 @@ def _download(url, dest, verify_ipa=True):
         with open(dest, "wb") as f:
             for chunk in r.iter_content(chunk_size=1 << 20):
                 f.write(chunk); done += len(chunk)
+                if time.time() - start > dl_max:   # تحميل بطيء جداً → تخطٍّ نظيف
+                    mb = done // 1048576; tmb = (total // 1048576) if total else '؟'
+                    raise RuntimeError(f"SLOW_DL: التحميل بطيء (تعدّى {dl_max // 60}د عند {mb}MB من {tmb}MB) — تخطٍّ")
     if done == 0:
         raise RuntimeError("DEAD_APP: 0-byte file on server")
     if total and done != total:
