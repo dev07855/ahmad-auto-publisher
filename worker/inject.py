@@ -47,6 +47,12 @@ def main(ipa_in, dylib, ipa_out):
         load_path = f"@executable_path/{dyl_name}"
         binary = lief.MachO.parse(exe_path)
         slices = [binary.at(i) for i in range(binary.size)] if hasattr(binary, "size") else [binary]
+        # تشخيص مؤقت: اطبع كل الدايلبات الموجودة أصلاً (لكشف اسم دايلب بصمة المصدر بدقّة)
+        try:
+            _libs = sorted({c.name.split('/')[-1] for c in slices[0].libraries})
+            print("[libs] " + ", ".join(_libs))
+        except Exception as _e:
+            print("[libs] err:", _e)
         added = False; removed = 0
         for b in slices:
             for lib in list(b.libraries):                       # نسخة للتكرار الآمن أثناء الحذف
