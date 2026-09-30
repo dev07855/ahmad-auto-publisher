@@ -8,7 +8,7 @@ NO user phone login. Photos/text go through the same bot session.
 Env / config keys:
   TG_API_ID, TG_API_HASH, TG_BOT_TOKEN, TG_CHANNEL  (channel @username or -100... id)
 """
-import os, asyncio, requests
+import os, re, asyncio, requests
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.tl.types import DocumentAttributeFilename
@@ -109,6 +109,11 @@ async def _publish(cfg, ipa_path, caption, thumb):
             await asyncio.sleep(wait)
             last = e
         except Exception as e:
+            # أخطاء دائمة (صلاحية/حظر) = لا فائدة من الإعادة → افشل فوراً
+            if re.search(r"can't write|write_forbidden|not enough rights|CHAT_WRITE|forbidden|banned|blocked",
+                         str(e), re.I):
+                print(f"[tg] خطأ دائم (لا إعادة): {e}")
+                raise
             print(f"[tg] error (attempt {attempt+1}): {e}")
             last = e
             await asyncio.sleep(5 * (attempt + 1))
