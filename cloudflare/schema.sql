@@ -59,7 +59,8 @@ CREATE TABLE IF NOT EXISTS channels (
   enabled  INTEGER DEFAULT 0,       -- 0 = مكتشفة/موقوفة | 1 = مفعّلة
   added_at INTEGER,
   dylib    TEXT,                    -- دايلب خاص بالقناة (NULL = الافتراضي العام dylib_active)
-  owner    TEXT                     -- مالك تنبيهات القناة (telegram id؛ NULL = كل الملّاك)
+  owner    TEXT,                    -- مالك تنبيهات القناة (telegram id؛ NULL = كل الملّاك)
+  footer   TEXT                     -- نص القناة الخاص أسفل كل منشور (NULL = النص العام settings.footer)
 );
 
 -- ربط القنوات بالأقسام (متعدّد لمتعدّد): قناة تنشر قسماً إن وُجد الصف

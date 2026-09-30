@@ -47,12 +47,6 @@ def main(ipa_in, dylib, ipa_out):
         load_path = f"@executable_path/{dyl_name}"
         binary = lief.MachO.parse(exe_path)
         slices = [binary.at(i) for i in range(binary.size)] if hasattr(binary, "size") else [binary]
-        # تشخيص مؤقت: اطبع كل الدايلبات الموجودة أصلاً (لكشف اسم دايلب بصمة المصدر بدقّة)
-        try:
-            _libs = sorted({c.name.split('/')[-1] for c in slices[0].libraries})
-            print("[libs] " + ", ".join(_libs))
-        except Exception as _e:
-            print("[libs] err:", _e)
         added = False; removed = 0
         for b in slices:
             for lib in list(b.libraries):                       # نسخة للتكرار الآمن أثناء الحذف
@@ -64,12 +58,12 @@ def main(ipa_in, dylib, ipa_out):
         binary.write(exe_path)
         os.chmod(exe_path, 0o755)
 
-        # احذف ملفات دايلبات البرandة نفسها من جذر التطبيق
+        # احذف ملفات دايلبات البرandة نفسها أينما وُجدت (الجذر أو Frameworks)
         for name in strip:
-            p = os.path.join(app, name)
-            if os.path.isfile(p):
-                os.remove(p)
-                print(f"[strip] removed {name}")
+            for p in (os.path.join(app, name), os.path.join(app, "Frameworks", name)):
+                if os.path.isfile(p):
+                    os.remove(p)
+                    print(f"[strip] removed {os.path.relpath(p, app)}")
 
         # 3) repackage (preserve tree; symlinks are rare in IPAs and re-signing handles the rest)
         if os.path.exists(ipa_out):

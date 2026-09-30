@@ -1,0 +1,38 @@
+name: telegram-source
+on:
+  schedule:
+    - cron: "*/15 * * * *"   # كل 15 دقيقة: يقرأ الجديد من قناة المصدر وينشر
+  workflow_dispatch: {}
+permissions:
+  contents: read
+# قراءة/نشر واحد في كل وقت (جلسة البوت + المؤشّر) — يمنع التداخل
+concurrency:
+  group: telegram-source-serial
+  cancel-in-progress: false
+jobs:
+  pull:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      - run: pip install -r worker/requirements.txt
+      - name: write fallback dylib from secret (gzip+base64)
+        run: printf '%s' "${{ secrets.DYLIB_GZ_B64 }}" | base64 -d | gunzip > worker/fixipa.dylib
+      - name: read source & publish
+        working-directory: worker
+        env:
+          DYLIB_PATH: fixipa.dylib
+          STRIP_DYLIBS: "3BodSyPatch.dylib"       # بصمة المصدر (تُشال، والمود يبقى)
+          TG_USER_API_ID: ${{ secrets.TG_USER_API_ID }}
+          TG_USER_API_HASH: ${{ secrets.TG_USER_API_HASH }}
+          TG_USER_SESSION: ${{ secrets.TG_USER_SESSION }}
+          SOURCE_CHANNEL: ${{ secrets.SOURCE_CHANNEL }}
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHANNEL: ${{ secrets.TG_CHANNEL }}
+          BRAIN_URL: ${{ secrets.BRAIN_URL }}
+          ENQUEUE_SECRET: ${{ secrets.ENQUEUE_SECRET }}
+        run: python -u tg_source.py

@@ -127,11 +127,12 @@ async function channelView(env, cid) {
   const subs = new Set(((await env.DB.prepare('SELECT section_key FROM channel_sections WHERE chat_id=?').bind(cid).all()).results || []).map(r => r.section_key));
   const kb = secs.map(s => [{ text: `${subs.has(s.key) ? '✅' : '⬜️'} ${s.name}`, callback_data: `chsec_${cid}_${s.key}` }]);
   kb.push([{ text: `📎 دايلب القناة: ${c.dylib || 'الافتراضي العام'}`, callback_data: `chdyl_${cid}` }]);
+  kb.push([{ text: `✏️ نص القناة: ${c.footer ? (c.footer.length > 18 ? c.footer.slice(0, 18) + '…' : c.footer) : 'النص العام'}`, callback_data: `chfoot_${cid}` }]);
   kb.push([{ text: `🔔 تنبيهات القناة لـ: ${c.owner || 'الكل'}`, callback_data: `chown_${cid}` }]);
   kb.push([{ text: c.enabled ? '🔴 إيقاف القناة' : '🟢 تفعيل القناة', callback_data: `chtog_${cid}` }]);
   kb.push([{ text: '🗑️ حذف القناة', callback_data: `chdel_${cid}` }]);
   kb.push([{ text: '⬅️ القنوات', callback_data: 'channels' }]);
-  const text = `<b>${H(c.name || cid)}</b>\nالحالة: ${c.enabled ? '🟢 مفعّلة' : '⚪️ موقوفة'}\nالدايلب: ${H(c.dylib || 'الافتراضي العام')}\nتنبيهاتها لـ: ${H(c.owner || 'الكل')}\n\nاختر الأقسام اللي تنشر بهالقناة (✅ = تنشر فيها):`;
+  const text = `<b>${H(c.name || cid)}</b>\nالحالة: ${c.enabled ? '🟢 مفعّلة' : '⚪️ موقوفة'}\nالدايلب: ${H(c.dylib || 'الافتراضي العام')}\nنص القناة: ${H(c.footer || 'النص العام')}\nتنبيهاتها لـ: ${H(c.owner || 'الكل')}\n\nاختر الأقسام اللي تنشر بهالقناة (✅ = تنشر فيها):`;
   return { text, kb };
 }
 
@@ -266,6 +267,13 @@ async function tick(env) {
   if (pausedUntil && nowSec() < pausedUntil) return 'paused';
 
   await reclaimStuck(env);
+
+  // النشر تسلسلي (مجموعة publish-serial بقِثهب: تشغيل واحد فقط في كل وقت).
+  // لا تُطلق تطبيقاً جديداً وآخرُ لم يزل قيد التنفيذ — وإلا تتزاحم التشغيلات ويُلغي قِثهب المتأخّر،
+  // فيتوقف النشر عن أغلب القنوات (خاصةً آخر قناة بالترتيب). ننتظر حتى يفرغ ثم نطلق التالي.
+  const inflight = await env.DB.prepare("SELECT COUNT(*) c FROM queue WHERE status='processing'").first();
+  if (inflight && inflight.c > 0) return 'busy';
+
   const footer = await getSetting(env, 'footer', '');
   const mix = (await getSetting(env, 'mix_mode', '0')) === '1';
 
@@ -698,6 +706,13 @@ async function handleCallback(env, cq) {
     kb.push([{ text: '⬅️ رجوع', callback_data: `ch_${cid}` }]);
     return edit('<b>🔔 مالك تنبيهات هذه القناة</b>\nمين توصله تنبيهاتها (مشتركين/معالم/هبوط)؟\n<i>«الكل» = توصل الاثنين.</i>', kb);
   }
+  const chfootm = data.match(/^chfoot_(-?\d+)$/);
+  if (chfootm) {
+    const cid = chfootm[1];
+    const cr = await env.DB.prepare('SELECT name, footer FROM channels WHERE chat_id=?').bind(cid).first();
+    await setSetting(env, 'await', 'chfoot:' + cid);
+    return edit(`✏️ أرسل النص الخاص بقناة «${H(cr && cr.name || cid)}» (يظهر أسفل كل منشور).\nالحالي: ${H(cr && cr.footer || 'النص العام')}\n<i>أرسل «-» لإرجاعها للنص العام.</i>`, [[{ text: '⬅️ رجوع', callback_data: `ch_${cid}` }]]);
+  }
   const chm = data.match(/^ch_(-?\d+)$/);
   if (chm) {
     const v = await channelView(env, chm[1]);
@@ -820,6 +835,15 @@ async function handleMessage(env, msg) {
     await setSetting(env, 'await', '');
     await setSetting(env, 'footer', text === '-' ? '' : text);
     return reply(text === '-' ? '✅ مُسح الفوتر.' : '✅ حُدّث الفوتر.');
+  }
+  // وضع انتظار نص قناة معيّنة: الرسالة التالية = فوتر تلك القناة (- = النص العام)
+  if (awaiting.startsWith('chfoot:')) {
+    await setSetting(env, 'await', '');
+    const cid = awaiting.slice(7);
+    const val = text === '-' ? null : text;
+    const res = await env.DB.prepare('UPDATE channels SET footer=? WHERE chat_id=?').bind(val, cid).run();
+    if (!res.meta || res.meta.changes !== 1) return reply('⚠️ القناة ما عادت موجودة.');
+    return reply(val === null ? '✅ رجّعت القناة للنص العام.' : '✅ حُدّث نص القناة.');
   }
   // وضع انتظار رقم لقسم: الرسالة التالية (رقم) تصير عدد القسم
   if (awaiting.startsWith('num:')) {
@@ -1139,6 +1163,36 @@ export default {
       }
     }
 
+    // مصدر تلقرام (@AbodSyripa): كل ما يحتاجه القارئ في نداء واحد + تحديث آخر رسالة معالَجة
+    if (url.pathname === '/tgsource') {
+      if (request.headers.get('x-secret') !== env.ENQUEUE_SECRET) return new Response('forbidden', { status: 403 });
+      if (request.method === 'POST') {
+        const b = await readJson();
+        if (b && b.last_id != null) await setSetting(env, 'tg_last_id', String(b.last_id));
+        return Response.json({ ok: true });
+      }
+      // GET: الأهداف = كل القنوات المفعّلة مجمّعة بالدايلب (بلا تصفية قسم — مصدر واحد مختلط)
+      // كل قناة تحمل نصّها الخاص (footer)؛ الفارغ = النص العام
+      const active = await getSetting(env, 'dylib_active', '');
+      const rows = (await env.DB.prepare('SELECT chat_id, username, dylib, footer FROM channels WHERE enabled=1').all()).results || [];
+      const byDylib = {};
+      for (const r of rows) {
+        const dyl = r.dylib || active || '';
+        const ident = r.username || r.chat_id;
+        (byDylib[dyl] = byDylib[dyl] || []).push({ id: ident, footer: r.footer || '' });
+      }
+      let groups = Object.entries(byDylib).map(([dylib, channels]) => ({ dylib, channels }));
+      if (!groups.length && env.TG_CHANNEL) groups = [{ dylib: active, channels: [{ id: env.TG_CHANNEL, footer: '' }] }];
+      return Response.json({
+        enabled: (await getSetting(env, 'tg_source_enabled', '0')) === '1',
+        last_id: parseInt(await getSetting(env, 'tg_last_id', '0'), 10) || 0,
+        limit: parseInt(await getSetting(env, 'tg_source_limit', '4'), 10) || 4,   // كم تطبيق كحد أقصى لكل تشغيل
+        footer: await getSetting(env, 'footer', ''),
+        reactions: await getSetting(env, 'reactions', '🔥,❤️'),
+        groups,
+      });
+    }
+
     // إدخال تطبيقات من الماسح
     if (url.pathname === '/enqueue' && request.method === 'POST') {
       if (request.headers.get('x-secret') !== env.ENQUEUE_SECRET) return new Response('forbidden', { status: 403 });
@@ -1165,8 +1219,9 @@ export default {
       const errMsg = String(body.error || '');
       // تطبيق تالف (0 بايت) = تخطٍّ فوري بلا إعادة محاولة (لا يؤخّر الطابور)
       const isDead = errMsg.includes('DEAD_APP');
-      // أكبر من حد تلقرام (2 جيجا) = تخطٍّ فوري (بلا 3 محاولات) لكن مع تنبيه المالك مرة
-      const isOversize = errMsg.includes('OVERSIZE') || /file parts is invalid|entity too large|request entity too large|too big/i.test(errMsg);
+      // أكبر من حد تلقرام (2 جيجا) أو تحميل بطيء جداً = تخطٍّ فوري (بلا 3 محاولات) لكن مع تنبيه المالك مرة
+      // (الملف الضخم/المخنوق لا يخلص بمهلة الوظيفة، فإعادته 3 مرات تسدّ أنبوب النشر على باقي القنوات)
+      const isOversize = errMsg.includes('OVERSIZE') || errMsg.includes('SLOW_DL') || /file parts is invalid|entity too large|request entity too large|too big/i.test(errMsg);
       const row = await env.DB.prepare('SELECT attempts FROM queue WHERE app_id=?').bind(body.app_id).first();
       const attempts = (row ? (row.attempts || 0) : 0) + 1;
       const giveUp = isDead || isOversize || attempts >= 3;  // تالف/كبير = فوراً، وإلا بعد 3 محاولات

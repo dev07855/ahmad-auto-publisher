@@ -65,24 +65,31 @@ async def _publish_once(cfg, ipa_path, caption, thumb):
         if cfg.get("brain"):
             _save_session(cfg, client.session.save())
     try:
-        channels = cfg.get("channels") or ([cfg["channel"]] if cfg.get("channel") else [])
-        channels = [_norm_chan(c) for c in channels if str(c).strip()]
-        if not channels:
+        # أهداف النشر: إمّا targets (تعليق خاص لكل قناة) أو channels (تعليق موحّد).
+        targets = cfg.get("targets")
+        if targets:
+            pairs = [(_norm_chan(t["chan"]), (t.get("caption") or caption))
+                     for t in targets if str(t.get("chan", "")).strip()]
+        else:
+            channels = cfg.get("channels") or ([cfg["channel"]] if cfg.get("channel") else [])
+            pairs = [(_norm_chan(c), caption) for c in channels if str(c).strip()]
+        if not pairs:
             raise RuntimeError("no target channel(s) to publish to")
         fname = os.path.basename(ipa_path)
 
         # رسالة واحدة نظيفة وفخمة: الملف (IPA) يحمل أيقونة التطبيق كصورة مصغّرة + الوصف تعليقاً.
-        # يُرفع الملف مرة للقناة الأولى، ثم يُعاد استخدام نفس ملف تلقرام لباقي القنوات (بلا إعادة رفع).
+        # يُرفع الملف مرة للقناة الأولى، ثم يُعاد استخدام نفس ملف تلقرام لباقي القنوات (بلا إعادة رفع)
+        # مع تعليق كل قناة الخاص.
         emojis = cfg.get("reactions") or []
         first = await client.send_file(
-            channels[0], ipa_path, caption=caption, parse_mode="html",
+            pairs[0][0], ipa_path, caption=pairs[0][1], parse_mode="html",
             force_document=True, thumb=thumb, part_size_kb=512,
             attributes=[DocumentAttributeFilename(fname)],
         )
-        await _react(client, channels[0], first.id, emojis)
-        for chan in channels[1:]:
+        await _react(client, pairs[0][0], first.id, emojis)
+        for chan, cap in pairs[1:]:
             m = await client.send_file(
-                chan, first.media, caption=caption, parse_mode="html",
+                chan, first.media, caption=cap, parse_mode="html",
                 force_document=True,
                 attributes=[DocumentAttributeFilename(fname)],
             )
