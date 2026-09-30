@@ -1,7 +1,7 @@
 name: telegram-source
 on:
   schedule:
-    - cron: "*/15 * * * *"   # كل 15 دقيقة: يقرأ الجديد من قناة المصدر وينشر
+    - cron: "*/10 * * * *"   # كل 10 دقائق: يقرأ الجديد من قناة المصدر وينشر
   workflow_dispatch: {}
 permissions:
   contents: read
