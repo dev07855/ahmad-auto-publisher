@@ -12,7 +12,7 @@ Env:
   DYLIB_PATH                                           # دايلب احتياطي
   STRIP_DYLIBS = 3BodSyPatch.dylib                     # بصمة المصدر (تُشال)
 """
-import os, re, sys, html, tempfile, shutil, traceback, requests
+import os, re, sys, html, tempfile, shutil, traceback, struct, zlib, zipfile, glob, requests
 from telethon.sync import TelegramClient
 from telethon.sessions import StringSession
 from telethon.tl.types import MessageMediaDocument, DocumentAttributeFilename
@@ -28,11 +28,13 @@ HDR = {"x-secret": SECRET}
 def brain_get():
     return requests.get(BRAIN + "/tgsource", headers=HDR, timeout=30).json()
 
-def brain_set_last(mid):
+def brain_set_state(**kw):
+    """يحدّث مؤشّرات الحالة بالعقل (last_id للجديد، back_id للباكفل)."""
     try:
-        requests.post(BRAIN + "/tgsource", headers=HDR, json={"last_id": int(mid)}, timeout=30)
+        requests.post(BRAIN + "/tgsource", headers=HDR,
+                      json={k: int(v) for k, v in kw.items() if v is not None}, timeout=30)
     except Exception as e:
-        print("[state] set last failed:", e)
+        print("[state] set failed:", e)
 
 def brain_published(app_id, name, version):
     try:
@@ -108,11 +110,68 @@ def build_caption(name, version, cap, footer, size=0):
     return worker.build_caption(info, footer=footer)
 
 
+# ---- استخراج أيقونة التطبيق من الـIPA (تظهر كصورة مصغّرة على المنشور) ----
+def _paeth(a, b, c):
+    p = a + b - c; pa = abs(p - a); pb = abs(p - b); pc = abs(p - c)
+    return a if (pa <= pb and pa <= pc) else (b if pb <= pc else c)
+
+def _cgbi_to_image(data):
+    """يفكّ PNG بصيغة آبل CgBI (أو العادي) → صورة PIL RGB."""
+    from PIL import Image
+    import io
+    if data[:8] != b'\x89PNG\r\n\x1a\n':
+        return Image.open(io.BytesIO(data)).convert('RGB')
+    pos = 8; w = h = None; idat = b''; cgbi = False
+    while pos < len(data):
+        ln = struct.unpack('>I', data[pos:pos+4])[0]; typ = data[pos+4:pos+8]; chunk = data[pos+8:pos+8+ln]
+        if typ == b'CgBI': cgbi = True
+        elif typ == b'IHDR': w, h = struct.unpack('>II', chunk[:8])
+        elif typ == b'IDAT': idat += chunk
+        elif typ == b'IEND': break
+        pos += 12 + ln
+    if not cgbi:
+        return Image.open(io.BytesIO(data)).convert('RGB')
+    raw = zlib.decompressobj(-15).decompress(idat)
+    bpp = 4; stride = w * bpp; out = bytearray(); prev = bytearray(stride); i = 0
+    for _ in range(h):
+        f = raw[i]; i += 1; line = bytearray(raw[i:i+stride]); i += stride
+        for x in range(stride):
+            a = line[x-bpp] if x >= bpp else 0; b = prev[x]; c = prev[x-bpp] if x >= bpp else 0
+            if f == 1: line[x] = (line[x] + a) & 255
+            elif f == 2: line[x] = (line[x] + b) & 255
+            elif f == 3: line[x] = (line[x] + ((a + b) >> 1)) & 255
+            elif f == 4: line[x] = (line[x] + _paeth(a, b, c)) & 255
+        prev = line; out += line
+    for p in range(0, len(out), 4):        # BGRA→RGBA + فك الضرب المسبق بالألفا
+        B, G, R, A = out[p], out[p+1], out[p+2], out[p+3]
+        if A: R = min(255, R*255//A); G = min(255, G*255//A); B = min(255, B*255//A)
+        out[p], out[p+1], out[p+2] = R, G, B
+    return Image.frombytes('RGBA', (w, h), bytes(out)).convert('RGB')
+
+def extract_icon(ipa_path, dest):
+    """أكبر AppIcon داخل الـIPA → thumb.jpg بحجم 320 (أو None لو تعذّر)."""
+    try:
+        with zipfile.ZipFile(ipa_path) as z:
+            names = [n for n in z.namelist()
+                     if re.search(r'Payload/[^/]+\.app/AppIcon[^/]*\.png$', n, re.I)]
+            if not names:
+                names = [n for n in z.namelist() if re.search(r'Payload/[^/]+\.app/[^/]*[Ii]con[^/]*\.png$', n)]
+            if not names:
+                return None
+            best = max(names, key=lambda n: z.getinfo(n).file_size)   # الأكبر ≈ الأعلى دقّة
+            img = _cgbi_to_image(z.read(best))
+        img.thumbnail((320, 320))
+        img.save(dest, "JPEG", quality=88)
+        return dest
+    except Exception as e:
+        print("[icon] skip:", str(e)[:80]); return None
+
+
 def publish_app(app, cfg_base, groups, reactions, footer):
     """حقن + نشر تطبيق نُزّل مسبقاً (بلا جلسة telethon — نتفادى تعارض حلقات asyncio)."""
     name, version, cap, size = app["name"], app["version"], app["cap"], app["size"]
     raw, workdir = app["raw"], app["workdir"]
-    thumb = None  # يمكن لاحقاً استخراج الأيقونة من الـIPA
+    thumb = extract_icon(raw, os.path.join(workdir, "thumb.jpg"))   # أيقونة التطبيق كصورة مصغّرة
     info = {"name": name, "version": version}
     published_any = False; errors = []
     for g in groups:
@@ -151,15 +210,45 @@ def publish_app(app, cfg_base, groups, reactions, footer):
     raise RuntimeError("كل المجموعات فشلت: " + ("; ".join(errors) or "لا قنوات"))
 
 
+def _collect_ipa(client, **kw):
+    """رسائل .ipa حسب معايير iter_messages، بترتيب إرجاع telethon."""
+    res = []
+    for m in client.iter_messages(CH, **kw):
+        if isinstance(m.media, MessageMediaDocument) and m.document:
+            fn = next((a.file_name for a in m.document.attributes if isinstance(a, DocumentAttributeFilename)), None)
+            if fn and fn.lower().endswith(".ipa"):
+                res.append(m)
+    return res
+
+def _download(client, m, kind):
+    name, version, cap = parse_meta(m.message, next(
+        (a.file_name for a in m.document.attributes if isinstance(a, DocumentAttributeFilename)), None))
+    size = m.document.size or 0
+    if size > worker.TG_MAX_BYTES:
+        return {"id": m.id, "oversize": True, "name": name, "kind": kind}
+    workdir = tempfile.mkdtemp(prefix="tg_")
+    raw = os.path.join(workdir, "raw.ipa")
+    print(f"[download] {name} v{version} ({round(size/1048576,1)}MB) [{kind}] ...")
+    client.download_media(m, file=raw)
+    return {"id": m.id, "name": name, "version": version, "cap": cap,
+            "size": size, "raw": raw, "workdir": workdir, "kind": kind}
+
+def _cleanup(it):
+    if it.get("workdir"):
+        shutil.rmtree(it["workdir"], ignore_errors=True)
+
+
 def run():
     st = brain_get()
     if not st.get("enabled", True):
         print("مصدر تلقرام موقوف"); return
-    last_id = int(st.get("last_id", 0) or 0)
     limit = int(st.get("limit", 4) or 4)
     groups = st.get("groups", [])
     reactions = [e.strip() for e in (st.get("reactions") or "").split(",") if e.strip()]
     footer = st.get("footer", "")
+    last_id = int(st.get("last_id", 0) or 0)   # مؤشّر الجديد (id > last_id)
+    back_id = int(st.get("back_id", 0) or 0)   # مؤشّر الباكفل (id < back_id)؛ 0 = لا باكفل
+    min_id = int(st.get("min_id", 0) or 0)     # حد الباكفل (تاريخ 2–3 أشهر)
     if not groups:
         print("لا قنوات مفعّلة — تخطٍّ"); return
 
@@ -167,49 +256,60 @@ def run():
     sess = os.environ["TG_USER_SESSION"]
     cfg_base = telegram.cfg_from_env()
 
-    # ── المرحلة 1: قراءة + تحميل (داخل جلسة telethon فقط) ──
-    items = []
+    # ── المرحلة 1: قراءة + تحميل (داخل جلسة telethon) ──
+    new_items = []; back_items = []
     with TelegramClient(StringSession(sess), api_id, api_hash) as client:
-        msgs = []
-        for m in client.iter_messages(CH, min_id=last_id, limit=60):
-            if isinstance(m.media, MessageMediaDocument) and m.document:
-                fn = next((a.file_name for a in m.document.attributes if isinstance(a, DocumentAttributeFilename)), None)
-                if fn and fn.lower().endswith(".ipa"):
-                    msgs.append(m)
-        msgs.sort(key=lambda x: x.id)              # الأقدم أولاً
-        if not msgs:
-            print("لا جديد"); return
-        print(f"جديد: {len(msgs)} تطبيق (نعالج حتى {limit})")
-        for m in msgs[:limit]:
-            name, version, cap = parse_meta(m.message, next(
-                (a.file_name for a in m.document.attributes if isinstance(a, DocumentAttributeFilename)), None))
-            size = m.document.size or 0
-            if size > worker.TG_MAX_BYTES:
-                items.append({"id": m.id, "oversize": True, "name": name}); continue
-            workdir = tempfile.mkdtemp(prefix="tg_")
-            raw = os.path.join(workdir, "raw.ipa")
-            print(f"[download] {name} v{version} ({round(size/1048576,1)}MB) ...")
-            client.download_media(m, file=raw)
-            items.append({"id": m.id, "name": name, "version": version, "cap": cap,
-                          "size": size, "raw": raw, "workdir": workdir})
+        # (1) الجديد: أحدث من last_id — الأقدم أولاً ليظهر بترتيبه، حد limit
+        new = sorted(_collect_ipa(client, min_id=last_id, reverse=True, limit=limit * 4), key=lambda x: x.id)[:limit]
+        for m in new:
+            new_items.append(_download(client, m, "new"))
+        # (2) الباكفل: أقدم من back_id (الأحدث أولاً) حتى min_id — نملأ المتبقّي من الحد
+        room = limit - len(new)
+        if room > 0 and back_id and back_id > min_id:
+            old = [m for m in _collect_ipa(client, offset_id=back_id, limit=room * 4) if m.id > min_id][:room]
+            for m in old:
+                back_items.append(_download(client, m, "back"))
+        if not new_items and not back_items:
+            print("لا جديد ولا باكفل"); return
+        print(f"جديد: {len(new_items)} | باكفل: {len(back_items)}")
 
-    # ── المرحلة 2: حقن + نشر (خارج جلسة telethon) بالترتيب ──
-    done = 0
-    for it in items:
+    # ── المرحلة 2: حقن + نشر (خارج الجلسة) ──
+    done = 0; broke = False
+
+    new_cur = last_id                          # الجديد بالترتيب التصاعدي
+    for it in new_items:
         if it.get("oversize"):
-            print(f"[skip] {it['name']}: أكبر من حد تلقرام")
-            brain_set_last(it["id"]); continue
+            print(f"[skip] {it['name']}: كبير"); new_cur = it["id"]; continue
         try:
-            res = publish_app(it, cfg_base, groups, reactions, footer)
-            brain_set_last(it["id"])
-            if res == "ok":
-                done += 1
+            publish_app(it, cfg_base, groups, reactions, footer); new_cur = it["id"]; done += 1
         except BaseException as e:
-            traceback.print_exc()
-            print(f"[fail] tg{it['id']}: {str(e)[:200]}")
-            break   # نوقف عند أول فشل حتى لا نتخطّى تطبيقاً (يُعاد المرّة الجاية)
+            traceback.print_exc(); print(f"[fail] tg{it['id']}: {str(e)[:200]}"); broke = True
         finally:
-            shutil.rmtree(it["workdir"], ignore_errors=True)
+            _cleanup(it)
+        if broke:
+            break
+    if new_cur > last_id:
+        brain_set_state(last_id=new_cur)
+
+    if not broke:
+        back_cur = back_id                     # الباكفل بالترتيب التنازلي (الأحدث أولاً)
+        for it in back_items:
+            if it.get("oversize"):
+                print(f"[skip] {it['name']}: كبير"); back_cur = it["id"]; continue
+            try:
+                publish_app(it, cfg_base, groups, reactions, footer); back_cur = it["id"]; done += 1
+            except BaseException as e:
+                traceback.print_exc(); print(f"[fail back] tg{it['id']}: {str(e)[:200]}"); broke = True
+            finally:
+                _cleanup(it)
+            if broke:
+                break
+        if back_cur != back_id:
+            brain_set_state(back_id=back_cur)
+    else:
+        for it in back_items:                  # ما نشرنا الباكفل — نظّف
+            _cleanup(it)
+
     print(f"تمّت معالجة {done} تطبيق")
 
 

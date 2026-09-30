@@ -136,6 +136,26 @@ async function channelView(env, cid) {
   return { text, kb };
 }
 
+// شاشة مصدر التطبيقات (تلقرام 3BodSy): تشغيل/إيقاف + الحد لكل تشغيل + حالة الباكفل
+async function sourceView(env) {
+  const on = (await getSetting(env, 'tg_source_enabled', '0')) === '1';
+  const limit = parseInt(await getSetting(env, 'tg_source_limit', '4'), 10) || 4;
+  const backId = parseInt(await getSetting(env, 'tg_back_id', '0'), 10) || 0;
+  const minId = parseInt(await getSetting(env, 'tg_min_id', '0'), 10) || 0;
+  const backfilling = backId && backId > minId;
+  const text = `<b>📥 مصدر التطبيقات</b>\n\n` +
+    `الحالة: ${on ? '🟢 يعمل' : '⚪️ موقوف'}\n` +
+    `كل تشغيل: ${limit} تطبيق (كل 10 دقائق)\n` +
+    `السحب التدريجي: ${backfilling ? '🟡 شغّال (يسحب القديم بالتدريج)' : '✅ منتهٍ — الجديد فقط'}\n\n` +
+    `<i>يقرأ القناة تلقائياً، يشيل بصمتهم، يحقن بصمتك، وينشر بقنواتك.</i>`;
+  const kb = [
+    [{ text: on ? '⏸️ إيقاف المصدر' : '▶️ تشغيل المصدر', callback_data: 'srctog' }],
+    [{ text: `🔢 كل تشغيل: ${limit}`, callback_data: 'srclim' }],
+    [{ text: '⬅️ رجوع', callback_data: 'global' }],
+  ];
+  return { text, kb };
+}
+
 // شاشة الدايلبات: قائمة + المؤشّر ✅ للفعّال + زر حذف (نستخدم rowid بالأزرار لأمان الأسماء)
 async function dylibsView(env) {
   const rows = (await env.DB.prepare('SELECT rowid AS id,name,size FROM dylibs ORDER BY added_at DESC').all()).results || [];
@@ -385,6 +405,7 @@ async function panelMain(env) {
     [{ text: '🕐 إيقاف مؤقت', callback_data: 'pause' }],
     [{ text: '🚫 القائمة السوداء', callback_data: 'black' }, { text: '✍️ الفوتر', callback_data: 'footer' }],
     [{ text: '📢 القنوات', callback_data: 'channels' }, { text: '📎 الدايلب', callback_data: 'dylibs' }],
+    [{ text: '📥 مصدر التطبيقات', callback_data: 'source' }],
     [{ text: '👤 الملّاك', callback_data: 'owners' }, { text: '📖 دليل الاستخدام', callback_data: 'guide' }],
     [{ text: '⬅️ اختر القناة', callback_data: 'home' }, { text: '🔄 تحديث', callback_data: 'global' }],
   ];
@@ -795,6 +816,22 @@ async function handleCallback(env, cq) {
     await setSetting(env, 'await', 'footer');  // الرسالة التالية = الفوتر الجديد
     return edit(`<b>✍️ فوتر المنشور</b>\n\nالحالي:\n${H(f) || '(فاضي)'}\n\n✏️ أرسل الآن النص الجديد للفوتر (أو «-» لمسحه).`, back);
   }
+
+  // ═══ 📥 مصدر التطبيقات ═══
+  if (data === 'source') {
+    const v = await sourceView(env);
+    return edit(v.text, v.kb);
+  }
+  if (data === 'srctog') {
+    const cur = (await getSetting(env, 'tg_source_enabled', '0')) === '1';
+    await setSetting(env, 'tg_source_enabled', cur ? '0' : '1');
+    const v = await sourceView(env);
+    return edit(v.text, v.kb);
+  }
+  if (data === 'srclim') {
+    await setSetting(env, 'await', 'srclim');
+    return edit('🔢 أرسل عدد التطبيقات لكل تشغيل (كل 10 دقائق)، رقم من 1 إلى 20:', [[{ text: '⬅️ رجوع', callback_data: 'source' }]]);
+  }
 }
 
 async function handleMessage(env, msg) {
@@ -835,6 +872,14 @@ async function handleMessage(env, msg) {
     await setSetting(env, 'await', '');
     await setSetting(env, 'footer', text === '-' ? '' : text);
     return reply(text === '-' ? '✅ مُسح الفوتر.' : '✅ حُدّث الفوتر.');
+  }
+  // وضع انتظار عدد «كل تشغيل» لمصدر التطبيقات
+  if (awaiting === 'srclim') {
+    await setSetting(env, 'await', '');
+    const n = parseInt(text, 10);
+    if (!(n >= 1 && n <= 20)) return reply('❌ أرسل رقماً من 1 إلى 20.');
+    await setSetting(env, 'tg_source_limit', String(n));
+    return reply(`✅ صار المصدر يسحب ${n} تطبيق كل تشغيل (كل 10 دقائق).`);
   }
   // وضع انتظار نص قناة معيّنة: الرسالة التالية = فوتر تلك القناة (- = النص العام)
   if (awaiting.startsWith('chfoot:')) {
@@ -1169,6 +1214,7 @@ export default {
       if (request.method === 'POST') {
         const b = await readJson();
         if (b && b.last_id != null) await setSetting(env, 'tg_last_id', String(b.last_id));
+        if (b && b.back_id != null) await setSetting(env, 'tg_back_id', String(b.back_id));
         return Response.json({ ok: true });
       }
       // GET: الأهداف = كل القنوات المفعّلة مجمّعة بالدايلب (بلا تصفية قسم — مصدر واحد مختلط)
@@ -1186,6 +1232,8 @@ export default {
       return Response.json({
         enabled: (await getSetting(env, 'tg_source_enabled', '0')) === '1',
         last_id: parseInt(await getSetting(env, 'tg_last_id', '0'), 10) || 0,
+        back_id: parseInt(await getSetting(env, 'tg_back_id', '0'), 10) || 0,   // مؤشّر الباكفل (0 = لا باكفل)
+        min_id: parseInt(await getSetting(env, 'tg_min_id', '0'), 10) || 0,     // حد الباكفل (2–3 أشهر)
         limit: parseInt(await getSetting(env, 'tg_source_limit', '4'), 10) || 4,   // كم تطبيق كحد أقصى لكل تشغيل
         footer: await getSetting(env, 'footer', ''),
         reactions: await getSetting(env, 'reactions', '🔥,❤️'),
