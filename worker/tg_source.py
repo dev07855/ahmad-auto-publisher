@@ -108,17 +108,10 @@ def build_caption(name, version, cap, footer, size=0):
     return worker.build_caption(info, footer=footer)
 
 
-def process_message(client, m, cfg_base, groups, reactions, footer, workdir):
-    fn = next((a.file_name for a in m.document.attributes if isinstance(a, DocumentAttributeFilename)), None)
-    name, version, cap = parse_meta(m.message, fn)
-    size = m.document.size or 0
-    if size > worker.TG_MAX_BYTES:
-        print(f"[skip] {name}: أكبر من حد تلقرام"); return "oversize"
-
-    raw = os.path.join(workdir, "raw.ipa")
-    print(f"[download] {name} v{version} ({round(size/1048576,1)}MB) ...")
-    client.download_media(m, file=raw)
-
+def publish_app(app, cfg_base, groups, reactions, footer):
+    """حقن + نشر تطبيق نُزّل مسبقاً (بلا جلسة telethon — نتفادى تعارض حلقات asyncio)."""
+    name, version, cap, size = app["name"], app["version"], app["cap"], app["size"]
+    raw, workdir = app["raw"], app["workdir"]
     thumb = None  # يمكن لاحقاً استخراج الأيقونة من الـIPA
     info = {"name": name, "version": version}
     published_any = False; errors = []
@@ -150,12 +143,10 @@ def process_message(client, m, cfg_base, groups, reactions, footer, workdir):
         finally:
             try: os.remove(out)
             except OSError: pass
-    try: os.remove(raw)
-    except OSError: pass
 
     if published_any:
-        brain_published(f"tg{m.id}", name, version)
-        print(f"PUBLISHED tg{m.id} {name} | errors: {errors}")
+        brain_published(f"tg{app['id']}", name, version)
+        print(f"PUBLISHED tg{app['id']} {name} | errors: {errors}")
         return "ok"
     raise RuntimeError("كل المجموعات فشلت: " + ("; ".join(errors) or "لا قنوات"))
 
@@ -176,8 +167,9 @@ def run():
     sess = os.environ["TG_USER_SESSION"]
     cfg_base = telegram.cfg_from_env()
 
+    # ── المرحلة 1: قراءة + تحميل (داخل جلسة telethon فقط) ──
+    items = []
     with TelegramClient(StringSession(sess), api_id, api_hash) as client:
-        # اجمع الرسائل الجديدة (الأحدث من آخر معالجة) بترتيب زمني تصاعدي
         msgs = []
         for m in client.iter_messages(CH, min_id=last_id, limit=60):
             if isinstance(m.media, MessageMediaDocument) and m.document:
@@ -188,25 +180,37 @@ def run():
         if not msgs:
             print("لا جديد"); return
         print(f"جديد: {len(msgs)} تطبيق (نعالج حتى {limit})")
-
-        done = 0
-        for m in msgs:
-            if done >= limit:
-                break
+        for m in msgs[:limit]:
+            name, version, cap = parse_meta(m.message, next(
+                (a.file_name for a in m.document.attributes if isinstance(a, DocumentAttributeFilename)), None))
+            size = m.document.size or 0
+            if size > worker.TG_MAX_BYTES:
+                items.append({"id": m.id, "oversize": True, "name": name}); continue
             workdir = tempfile.mkdtemp(prefix="tg_")
-            try:
-                res = process_message(client, m, cfg_base, groups, reactions, footer, workdir)
-                brain_set_last(m.id)              # قدّم المؤشّر بعد كل نجاح/تخطٍّ
-                if res == "ok":
-                    done += 1
-            except BaseException as e:
-                traceback.print_exc()
-                # فشل معالجة رسالة: لا نقدّم المؤشّر (نعيد المحاولة المرّة الجاية)، ونكمل الباقي
-                print(f"[fail] tg{m.id}: {str(e)[:200]}")
-                break   # نوقف الدفعة عند أول فشل حتى لا نتخطّى تطبيقاً
-            finally:
-                shutil.rmtree(workdir, ignore_errors=True)
-        print(f"تمّت معالجة {done} تطبيق")
+            raw = os.path.join(workdir, "raw.ipa")
+            print(f"[download] {name} v{version} ({round(size/1048576,1)}MB) ...")
+            client.download_media(m, file=raw)
+            items.append({"id": m.id, "name": name, "version": version, "cap": cap,
+                          "size": size, "raw": raw, "workdir": workdir})
+
+    # ── المرحلة 2: حقن + نشر (خارج جلسة telethon) بالترتيب ──
+    done = 0
+    for it in items:
+        if it.get("oversize"):
+            print(f"[skip] {it['name']}: أكبر من حد تلقرام")
+            brain_set_last(it["id"]); continue
+        try:
+            res = publish_app(it, cfg_base, groups, reactions, footer)
+            brain_set_last(it["id"])
+            if res == "ok":
+                done += 1
+        except BaseException as e:
+            traceback.print_exc()
+            print(f"[fail] tg{it['id']}: {str(e)[:200]}")
+            break   # نوقف عند أول فشل حتى لا نتخطّى تطبيقاً (يُعاد المرّة الجاية)
+        finally:
+            shutil.rmtree(it["workdir"], ignore_errors=True)
+    print(f"تمّت معالجة {done} تطبيق")
 
 
 if __name__ == "__main__":
