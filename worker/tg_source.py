@@ -12,8 +12,8 @@ Env:
   DYLIB_PATH                                           # دايلب احتياطي
   STRIP_DYLIBS = 3BodSyPatch.dylib                     # بصمة المصدر (تُشال)
 """
-import os, re, sys, html, tempfile, shutil, traceback, struct, zlib, zipfile, glob, requests
-from telethon.sync import TelegramClient
+import os, re, sys, html, tempfile, shutil, traceback, struct, zlib, zipfile, glob, asyncio, requests
+from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.tl.types import MessageMediaDocument, DocumentAttributeFilename
 import main as worker
@@ -167,78 +167,62 @@ def extract_icon(ipa_path, dest):
         print("[icon] skip:", str(e)[:80]); return None
 
 
-def publish_app(app, cfg_base, groups, reactions, footer):
-    """حقن + نشر تطبيق نُزّل مسبقاً (بلا جلسة telethon — نتفادى تعارض حلقات asyncio)."""
-    name, version, cap, size = app["name"], app["version"], app["cap"], app["size"]
-    raw, workdir = app["raw"], app["workdir"]
-    thumb = extract_icon(raw, os.path.join(workdir, "thumb.jpg"))   # أيقونة التطبيق كصورة مصغّرة
-    info = {"name": name, "version": version}
-    published_any = False; errors = []
-    for g in groups:
-        chans = g.get("channels") or []
-        # كل قناة: {id, footer} — أو معرّف خام (توافق قديم)
-        norm = []
-        for c in chans:
-            if isinstance(c, dict):
-                cid = c.get("id")
-                ft = c.get("footer") if c.get("footer") not in (None, "") else footer
-            else:
-                cid, ft = c, footer
-            if cid:
-                norm.append((cid, ft))
-        if not norm:
-            continue
-        dylib_path = fetch_dylib(g.get("dylib") or "")
-        out = worker.inject_app(raw, info, dylib_path, workdir)   # يحقن + يشيل STRIP_DYLIBS
-        try:
-            # نص خاص لكل قناة (نفس الملف، تعليق مختلف)
-            targets = [{"chan": cid, "caption": build_caption(name, version, cap, ft, size=size)}
-                       for (cid, ft) in norm]
-            cfg = dict(cfg_base); cfg["targets"] = targets; cfg["reactions"] = reactions
-            telegram.publish(cfg, out, targets[0]["caption"], thumb)
-            published_any = True
-        except BaseException as e:
-            errors.append(str(e)[:120]); print("group publish failed:", e)
-        finally:
-            try: os.remove(out)
-            except OSError: pass
-
-    if published_any:
-        brain_published(f"tg{app['id']}", name, version)
-        print(f"PUBLISHED tg{app['id']} {name} | errors: {errors}")
-        return "ok"
-    raise RuntimeError("كل المجموعات فشلت: " + ("; ".join(errors) or "لا قنوات"))
+def _is_ipa(m):
+    if isinstance(m.media, MessageMediaDocument) and m.document:
+        fn = next((a.file_name for a in m.document.attributes if isinstance(a, DocumentAttributeFilename)), None)
+        return fn if (fn and fn.lower().endswith(".ipa")) else None
+    return None
 
 
-def _collect_ipa(client, **kw):
-    """رسائل .ipa حسب معايير iter_messages، بترتيب إرجاع telethon."""
-    res = []
-    for m in client.iter_messages(CH, **kw):
-        if isinstance(m.media, MessageMediaDocument) and m.document:
-            fn = next((a.file_name for a in m.document.attributes if isinstance(a, DocumentAttributeFilename)), None)
-            if fn and fn.lower().endswith(".ipa"):
-                res.append(m)
-    return res
-
-def _download(client, m, kind):
-    name, version, cap = parse_meta(m.message, next(
-        (a.file_name for a in m.document.attributes if isinstance(a, DocumentAttributeFilename)), None))
+async def _process_one(client, m, kind, cfg_base, groups, reactions, footer):
+    """ينزّل + يحقن + ينشر تطبيقاً واحداً فوراً لكل قنواته (حلقة asyncio واحدة)."""
+    fn = _is_ipa(m)
+    name, version, cap = parse_meta(m.message, fn)
     size = m.document.size or 0
     if size > worker.TG_MAX_BYTES:
-        return {"id": m.id, "oversize": True, "name": name, "kind": kind}
+        print(f"[skip] {name}: أكبر من حد تلقرام"); return "skip"
     workdir = tempfile.mkdtemp(prefix="tg_")
-    raw = os.path.join(workdir, "raw.ipa")
-    print(f"[download] {name} v{version} ({round(size/1048576,1)}MB) [{kind}] ...")
-    client.download_media(m, file=raw)
-    return {"id": m.id, "name": name, "version": version, "cap": cap,
-            "size": size, "raw": raw, "workdir": workdir, "kind": kind}
+    try:
+        raw = os.path.join(workdir, "raw.ipa")
+        print(f"[download] {name} v{version} ({round(size/1048576,1)}MB) [{kind}] ...")
+        await client.download_media(m, file=raw)
+        thumb = extract_icon(raw, os.path.join(workdir, "thumb.jpg"))   # أيقونة التطبيق
+        info = {"name": name, "version": version}
+        published_any = False; errors = []
+        for g in groups:
+            norm = []
+            for c in (g.get("channels") or []):
+                if isinstance(c, dict):
+                    cid = c.get("id"); ft = c.get("footer") if c.get("footer") not in (None, "") else footer
+                else:
+                    cid, ft = c, footer
+                if cid:
+                    norm.append((cid, ft))
+            if not norm:
+                continue
+            dylib_path = fetch_dylib(g.get("dylib") or "")
+            out = worker.inject_app(raw, info, dylib_path, workdir)   # يحقن + يشيل STRIP_DYLIBS
+            try:
+                targets = [{"chan": cid, "caption": build_caption(name, version, cap, ft, size=size)}
+                           for (cid, ft) in norm]
+                cfg = dict(cfg_base); cfg["targets"] = targets; cfg["reactions"] = reactions
+                await telegram._publish(cfg, out, targets[0]["caption"], thumb)   # نفس الحلقة
+                published_any = True
+            except BaseException as e:
+                errors.append(str(e)[:120]); print("group publish failed:", e)
+            finally:
+                try: os.remove(out)
+                except OSError: pass
+        if published_any:
+            brain_published(f"tg{m.id}", name, version)
+            print(f"PUBLISHED tg{m.id} {name} | errors: {errors}")
+            return "ok"
+        raise RuntimeError("كل المجموعات فشلت: " + ("; ".join(errors) or "لا قنوات"))
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
 
-def _cleanup(it):
-    if it.get("workdir"):
-        shutil.rmtree(it["workdir"], ignore_errors=True)
 
-
-def run():
+async def _run():
     st = brain_get()
     if not st.get("enabled", True):
         print("مصدر تلقرام موقوف"); return
@@ -256,61 +240,50 @@ def run():
     sess = os.environ["TG_USER_SESSION"]
     cfg_base = telegram.cfg_from_env()
 
-    # ── المرحلة 1: قراءة + تحميل (داخل جلسة telethon) ──
-    new_items = []; back_items = []
-    with TelegramClient(StringSession(sess), api_id, api_hash) as client:
-        # (1) الجديد: أحدث من last_id — الأقدم أولاً ليظهر بترتيبه، حد limit
-        new = sorted(_collect_ipa(client, min_id=last_id, reverse=True, limit=limit * 4), key=lambda x: x.id)[:limit]
-        for m in new:
-            new_items.append(_download(client, m, "new"))
-        # (2) الباكفل: أقدم من back_id (الأحدث أولاً) حتى min_id — نملأ المتبقّي من الحد
+    async with TelegramClient(StringSession(sess), api_id, api_hash) as client:
+        # اجمع الجديد (id>last_id) + الباكفل (id<back_id حتى min_id)
+        new = []
+        async for m in client.iter_messages(CH, min_id=last_id, reverse=True, limit=limit * 4):
+            if _is_ipa(m):
+                new.append(m)
+        new = new[:limit]
+        back = []
         room = limit - len(new)
         if room > 0 and back_id and back_id > min_id:
-            old = [m for m in _collect_ipa(client, offset_id=back_id, limit=room * 4) if m.id > min_id][:room]
-            for m in old:
-                back_items.append(_download(client, m, "back"))
-        if not new_items and not back_items:
+            async for m in client.iter_messages(CH, offset_id=back_id, limit=room * 4):
+                if _is_ipa(m) and m.id > min_id:
+                    back.append(m)
+            back = back[:room]
+        if not new and not back:
             print("لا جديد ولا باكفل"); return
-        print(f"جديد: {len(new_items)} | باكفل: {len(back_items)}")
+        print(f"جديد: {len(new)} | باكفل: {len(back)}")
 
-    # ── المرحلة 2: حقن + نشر (خارج الجلسة) ──
-    done = 0; broke = False
-
-    new_cur = last_id                          # الجديد بالترتيب التصاعدي
-    for it in new_items:
-        if it.get("oversize"):
-            print(f"[skip] {it['name']}: كبير"); new_cur = it["id"]; continue
-        try:
-            publish_app(it, cfg_base, groups, reactions, footer); new_cur = it["id"]; done += 1
-        except BaseException as e:
-            traceback.print_exc(); print(f"[fail] tg{it['id']}: {str(e)[:200]}"); broke = True
-        finally:
-            _cleanup(it)
-        if broke:
-            break
-    if new_cur > last_id:
-        brain_set_state(last_id=new_cur)
-
-    if not broke:
-        back_cur = back_id                     # الباكفل بالترتيب التنازلي (الأحدث أولاً)
-        for it in back_items:
-            if it.get("oversize"):
-                print(f"[skip] {it['name']}: كبير"); back_cur = it["id"]; continue
+        done = 0
+        # الجديد بالترتيب التصاعدي — ينشر كل واحد فوراً ويقدّم المؤشّر
+        for m in sorted(new, key=lambda x: x.id):
             try:
-                publish_app(it, cfg_base, groups, reactions, footer); back_cur = it["id"]; done += 1
+                res = await _process_one(client, m, "new", cfg_base, groups, reactions, footer)
+                brain_set_state(last_id=m.id)
+                if res == "ok":
+                    done += 1
             except BaseException as e:
-                traceback.print_exc(); print(f"[fail back] tg{it['id']}: {str(e)[:200]}"); broke = True
-            finally:
-                _cleanup(it)
-            if broke:
+                traceback.print_exc(); print(f"[fail] tg{m.id}: {str(e)[:200]}")
+                print(f"تمّت معالجة {done} تطبيق"); return   # لا نقدّم المؤشّر (يُعاد المرّة الجاية)
+        # الباكفل بالترتيب التنازلي (الأحدث أولاً)
+        for m in back:
+            try:
+                res = await _process_one(client, m, "back", cfg_base, groups, reactions, footer)
+                brain_set_state(back_id=m.id)
+                if res == "ok":
+                    done += 1
+            except BaseException as e:
+                traceback.print_exc(); print(f"[fail back] tg{m.id}: {str(e)[:200]}")
                 break
-        if back_cur != back_id:
-            brain_set_state(back_id=back_cur)
-    else:
-        for it in back_items:                  # ما نشرنا الباكفل — نظّف
-            _cleanup(it)
+        print(f"تمّت معالجة {done} تطبيق")
 
-    print(f"تمّت معالجة {done} تطبيق")
+
+def run():
+    asyncio.run(_run())
 
 
 if __name__ == "__main__":
