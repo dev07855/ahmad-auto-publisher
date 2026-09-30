@@ -24,7 +24,7 @@ jobs:
         working-directory: worker
         env:
           DYLIB_PATH: fixipa.dylib
-          STRIP_DYLIBS: "3BodSyPatch.dylib"       # بصمة المصدر (تُشال، والمود يبقى)
+          STRIP_DYLIBS: "blatantsPatch.dylib,AutoRcSideload.dylib"   # بصمة blatants (تُشال، والمود Satella يبقى)
           TG_USER_API_ID: ${{ secrets.TG_USER_API_ID }}
           TG_USER_API_HASH: ${{ secrets.TG_USER_API_HASH }}
           TG_USER_SESSION: ${{ secrets.TG_USER_SESSION }}
