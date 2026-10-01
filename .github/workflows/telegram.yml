@@ -35,4 +35,5 @@ jobs:
           TG_CHANNEL: ${{ secrets.TG_CHANNEL }}
           BRAIN_URL: ${{ secrets.BRAIN_URL }}
           ENQUEUE_SECRET: ${{ secrets.ENQUEUE_SECRET }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python -u tg_source.py

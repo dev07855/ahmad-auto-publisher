@@ -54,6 +54,7 @@ async function tg(env, method, payload) {
   return r.json();
 }
 const H = (s) => String(s ?? '').replace(/[<&>]/g, (c) => ({ '<': '&lt;', '&': '&amp;', '>': '&gt;' }[c]));
+const SEP = '\n━━━━━━━━━━━━\n';   // فاصل بريميوم أسود هادئ موحّد لكل الشاشات
 
 // الملّاك مخزّنون بجدول settings (تُعدَّل من البوت نفسه)؛ عند الفراغ نبدأ من سر OWNER_ID
 async function getOwners(env) {
@@ -143,10 +144,10 @@ async function sourceView(env) {
   const backId = parseInt(await getSetting(env, 'tg_back_id', '0'), 10) || 0;
   const minId = parseInt(await getSetting(env, 'tg_min_id', '0'), 10) || 0;
   const backfilling = backId && backId > minId;
-  const text = `<b>📥 مصدر التطبيقات</b>\n\n` +
+  const text = `<b>📥 مصدر التطبيقات</b>` + SEP +
     `الحالة: ${on ? '🟢 يعمل' : '⚪️ موقوف'}\n` +
     `كل تشغيل: ${limit} تطبيق (كل 10 دقائق)\n` +
-    `السحب التدريجي: ${backfilling ? '🟡 شغّال (يسحب القديم بالتدريج)' : '✅ منتهٍ — الجديد فقط'}\n\n` +
+    `السحب التدريجي: ${backfilling ? '🟡 شغّال (يسحب القديم بالتدريج)' : '✅ منتهٍ — الجديد فقط'}` + SEP +
     `<i>يقرأ القناة تلقائياً، يشيل بصمتهم، يحقن بصمتك، وينشر بقنواتك.</i>`;
   const kb = [
     [{ text: on ? '⏸️ إيقاف المصدر' : '▶️ تشغيل المصدر', callback_data: 'srctog' }],
@@ -389,12 +390,12 @@ async function panelMain(env) {
     : paused ? `⏸️ موقوف مؤقتاً (باقي ${fmtDur(pausedUntil - nowSec())})`
     : '🟢 يعمل';
   const text =
-    `<b>🧠 لوحة تحكم النشر</b>\n\n` +
+    `<b>🧠 لوحة تحكم النشر</b>` + SEP +
     `الحالة: ${statusLine}\n` +
     `النمط: ${mix ? '🔀 مخلوط' : '🗂️ مجمّع'}\n` +
-    `الإجمالي: ${total}/ساعة\n\n` +
+    `الإجمالي: ${total}/ساعة` + SEP +
     lines.join('\n') +
-    `\n\nنُشر اليوم: ${todayCount}`;
+    `\n\n📤 نُشر اليوم: <b>${todayCount}</b>`;
   const kb = [
     [{ text: enabled ? '⏸️ إيقاف' : '▶️ تشغيل', callback_data: 'toggle' }],
     [{ text: '🚀 نشر تطبيق فوراً', callback_data: 'pubnow' }],
@@ -402,6 +403,7 @@ async function panelMain(env) {
     [{ text: mix ? '🗂️ اجعله مجمّع' : '🔀 اجعله مخلوط', callback_data: 'mix' },
      { text: daily ? '🔕 إيقاف الملخص اليومي' : '🔔 تفعيل الملخص اليومي', callback_data: 'daily' }],
     [{ text: '👥 المشتركون', callback_data: 'subs' }, { text: '📊 التقرير', callback_data: 'report' }],
+    [{ text: '📈 التحليلات والأهداف', callback_data: 'stats' }],
     [{ text: '🕐 إيقاف مؤقت', callback_data: 'pause' }],
     [{ text: '🚫 القائمة السوداء', callback_data: 'black' }, { text: '✍️ الفوتر', callback_data: 'footer' }],
     [{ text: '📢 القنوات', callback_data: 'channels' }, { text: '📎 الدايلب', callback_data: 'dylibs' }],
@@ -509,7 +511,7 @@ async function handleCallback(env, cq) {
       const arrow = !prev ? '' : g > 0 ? ` (+${g} ▲)` : g < 0 ? ` (${g} ▼)` : '';
       lines.push(`👥 <b>${H(c.name)}</b>: ${cnt}${arrow}`);
     }
-    return edit(`<b>👥 مشتركو قنواتك</b>\n\n${lines.join('\n')}`, [[{ text: '🔄 تحديث', callback_data: 'subs' }], ...back]);
+    return edit(`<b>👥 مشتركو قنواتك</b>${SEP}${lines.join('\n')}`, [[{ text: '🔄 تحديث', callback_data: 'subs' }], ...back]);
   }
 
   if (data === 'report') {
@@ -519,7 +521,69 @@ async function handleCallback(env, cq) {
     const last = (await env.DB.prepare("SELECT msg FROM log WHERE kind='ok' ORDER BY id DESC LIMIT 5").all()).results;
     const lastTxt = last.map(r => `• ${H(r.msg)}`).join('\n') || '—';
     const errTxt = errs.length ? '\n\n⚠️ آخر أخطاء:\n' + errs.map(e => '• ' + H(e.msg)).join('\n') : '';
-    return edit(`<b>📊 التقرير</b>\n\nنُشر اليوم: ${today}\n\nآخر ما نُشر:\n${lastTxt}${errTxt}`, back);
+    return edit(`<b>📊 التقرير</b>${SEP}📤 نُشر اليوم: <b>${today}</b>${SEP}آخر ما نُشر:\n${lastTxt}${errTxt}`, back);
+  }
+
+  // 📈 التحليلات والأهداف: متابعون (+نمو) · نشر · مشاهدات · تفاعلات · أهداف
+  if (data === 'stats') {
+    const today = ksaDay();
+    const chans = (await env.DB.prepare('SELECT chat_id,name,username FROM channels WHERE enabled=1').all()).results || [];
+    let subs = 0, prevDay = 0, prev7 = 0, haveSubs = false;
+    for (const c of chans) {
+      const cnt = await getSubscriberCount(env, c.username || c.chat_id);
+      if (cnt == null) continue;
+      haveSubs = true; subs += cnt;
+      let hist = [];
+      try { hist = JSON.parse(await getSetting(env, 'subs_hist_' + c.chat_id, '[]')) || []; } catch { hist = []; }
+      const past = hist.filter(e => e.d !== today);
+      prevDay += past.length ? past[past.length - 1].c : cnt;
+      prev7 += hist.length ? hist[Math.max(0, hist.length - 8)].c : cnt;
+    }
+    const gDay = haveSubs ? subs - prevDay : 0;
+    const g7 = haveSubs ? subs - prev7 : 0;
+    const pubToday = (await env.DB.prepare('SELECT COUNT(*) c FROM published WHERE published_day=?').bind(today).first()).c;
+    const pubTotal = (await env.DB.prepare('SELECT COUNT(*) c FROM published').first()).c;
+    let vh = [];
+    try { vh = JSON.parse(await getSetting(env, 'views_history', '[]')) || []; } catch { vh = []; }
+    const vt = vh.filter(e => e.d === today).slice(-1)[0] || { v: 0, r: 0, p: 0 };
+    const goalSubs = parseInt(await getSetting(env, 'goal_subs', '0'), 10) || 0;
+    const goalApps = parseInt(await getSetting(env, 'goal_apps', '0'), 10) || 0;
+    const bar = (cur, goal) => {
+      if (!goal) return 'غير محدّد';
+      const pct = Math.min(100, Math.round(cur / goal * 100));
+      const f = Math.round(pct / 10);
+      return '█'.repeat(f) + '░'.repeat(10 - f) + ` ${pct}% (${cur}/${goal})`;
+    };
+    const fmt = (n) => n > 0 ? `+${n} ▲` : n < 0 ? `${n} ▼` : '0';
+    const text =
+      `<b>📈 التحليلات والأهداف</b>` + SEP +
+      `👥 <b>المتابعون:</b> ${haveSubs ? subs : '—'}\n` +
+      `   • اليوم: ${fmt(gDay)}\n` +
+      `   • آخر ٧ أيام: ${fmt(g7)}` + SEP +
+      `📦 <b>النشر:</b>\n` +
+      `   • اليوم: ${pubToday}\n` +
+      `   • الإجمالي: ${pubTotal}` + SEP +
+      `👁️ <b>مشاهدات اليوم:</b> ${vt.v} (على ${vt.p} منشور)\n` +
+      `🔥 <b>تفاعلات اليوم:</b> ${vt.r}` +
+      (vt.p ? `\n📊 متوسط المشاهدات لكل منشور: ${Math.round(vt.v / vt.p)}` : '') +
+      SEP +
+      `🎯 <b>الأهداف:</b>\n` +
+      `   • متابعون: ${bar(subs, goalSubs)}\n` +
+      `   • تطبيقات منشورة: ${bar(pubTotal, goalApps)}`;
+    const kb = [
+      [{ text: '🔄 تحديث', callback_data: 'stats' }],
+      [{ text: '🎯 هدف المتابعين', callback_data: 'goalsubs' }, { text: '🎯 هدف التطبيقات', callback_data: 'goalapps' }],
+      ...back,
+    ];
+    return edit(text, kb);
+  }
+  if (data === 'goalsubs') {
+    await setSetting(env, 'await', 'goalsubs');
+    return edit('🎯 أرسل رقم هدف عدد <b>المتابعين</b> (0 = بلا هدف):', [[{ text: '⬅️ رجوع', callback_data: 'stats' }]]);
+  }
+  if (data === 'goalapps') {
+    await setSetting(env, 'await', 'goalapps');
+    return edit('🎯 أرسل رقم هدف عدد <b>التطبيقات المنشورة</b> (0 = بلا هدف):', [[{ text: '⬅️ رجوع', callback_data: 'stats' }]]);
   }
 
   // قائمة الأقسام (تعديل/تفعيل/حذف/إضافة)
@@ -881,6 +945,18 @@ async function handleMessage(env, msg) {
     await setSetting(env, 'tg_source_limit', String(n));
     return reply(`✅ صار المصدر يسحب ${n} تطبيق كل تشغيل (كل 10 دقائق).`);
   }
+  // وضع انتظار هدف المتابعين / التطبيقات
+  if (awaiting === 'goalsubs' || awaiting === 'goalapps') {
+    await setSetting(env, 'await', '');
+    const n = parseInt(text, 10);
+    if (!(n >= 0)) return reply('❌ أرسل رقماً صحيحاً (0 أو أكثر).');
+    if (awaiting === 'goalsubs') {
+      await setSetting(env, 'goal_subs', String(n));
+      return reply(n ? `✅ هدف المتابعين = ${n}.` : '✅ أُلغي هدف المتابعين.');
+    }
+    await setSetting(env, 'goal_apps', String(n));
+    return reply(n ? `✅ هدف التطبيقات المنشورة = ${n}.` : '✅ أُلغي هدف التطبيقات.');
+  }
   // وضع انتظار نص قناة معيّنة: الرسالة التالية = فوتر تلك القناة (- = النص العام)
   if (awaiting.startsWith('chfoot:')) {
     await setSetting(env, 'await', '');
@@ -979,7 +1055,25 @@ async function maybeDailySummary(env) {
     if (cnt != null) subsLines.push(`👥 ${c.name}: ${cnt}`);
   }
   const subsLine = subsLines.length ? '\n\n' + subsLines.join('\n') : '';
-  await notifyOwners(env, `<b>📊 ملخص اليوم (${today})</b>\n\nنُشر إجمالاً: ${total}${subsLine}\n\n${lines.join('\n')}\n\n⚠️ أخطاء: ${errs}`);
+  // 👁️ مشاهدات/تفاعلات اليوم + تقدّم الأهداف
+  let vh = [];
+  try { vh = JSON.parse(await getSetting(env, 'views_history', '[]')) || []; } catch { vh = []; }
+  const vt = vh.filter(e => e.d === today).slice(-1)[0];
+  const engLine = vt ? `\n\n👁️ مشاهدات اليوم: ${vt.v} | 🔥 تفاعلات: ${vt.r}` + (vt.p ? ` | 📊 متوسط: ${Math.round(vt.v / vt.p)}/منشور` : '') : '';
+  const goalApps = parseInt(await getSetting(env, 'goal_apps', '0'), 10) || 0;
+  const goalSubs = parseInt(await getSetting(env, 'goal_subs', '0'), 10) || 0;
+  let goalLines = [];
+  if (goalApps) {
+    const pubTotal = (await env.DB.prepare('SELECT COUNT(*) c FROM published').first()).c;
+    goalLines.push(`🎯 التطبيقات: ${pubTotal}/${goalApps} (${Math.min(100, Math.round(pubTotal / goalApps * 100))}%)`);
+  }
+  if (goalSubs && subsLines.length) {
+    const totSubs = (await Promise.all(((await env.DB.prepare('SELECT chat_id,username FROM channels WHERE enabled=1').all()).results || [])
+      .map(c => getSubscriberCount(env, c.username || c.chat_id)))).reduce((a, b) => a + (b || 0), 0);
+    goalLines.push(`🎯 المتابعون: ${totSubs}/${goalSubs} (${Math.min(100, Math.round(totSubs / goalSubs * 100))}%)`);
+  }
+  const goalLine = goalLines.length ? '\n\n' + goalLines.join('\n') : '';
+  await notifyOwners(env, `<b>📊 ملخص اليوم (${today})</b>${SEP}📤 نُشر إجمالاً: <b>${total}</b>${subsLine}${engLine}${goalLine}${SEP}${lines.join('\n')}${SEP}⚠️ أخطاء: ${errs}`);
 }
 
 // عدد مشتركي قناة محدّدة (ident = @username أو chat_id) — null إذا تعذّر
@@ -1124,7 +1218,7 @@ async function maybeBootstrap(env) {
 
 // ---------- المُوجّه ----------
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
     const readJson = async () => { try { return await request.json(); } catch { return null; } };
@@ -1146,8 +1240,13 @@ export default {
       const from = u.callback_query ? u.callback_query.from : (u.message ? u.message.from : null);
       const owners = await getOwners(env);
       if (!from || !owners.includes(String(from.id))) return new Response('ok'); // للملّاك فقط
-      if (u.callback_query) await handleCallback(env, u.callback_query);
-      else if (u.message) await handleMessage(env, u.message);
+      // عالج بالخلفية وردّ «ok» فوراً — أزرار طلقة سريعة + لا تجمّد بالضغط المكرر + لا إعادة من تلقرام
+      ctx.waitUntil((async () => {
+        try {
+          if (u.callback_query) await handleCallback(env, u.callback_query);
+          else if (u.message) await handleMessage(env, u.message);
+        } catch (e) { console.log('[handler]', (e && e.stack) || e); }
+      })());
       return new Response('ok');
     }
 
@@ -1208,6 +1307,24 @@ export default {
       }
     }
 
+    // تنبيه فوري للمالك (يرسله القارئ) — مع منع تكرار نفس التنبيه خلال 30 دقيقة
+    if (url.pathname === '/alert' && request.method === 'POST') {
+      if (request.headers.get('x-secret') !== env.ENQUEUE_SECRET) return new Response('forbidden', { status: 403 });
+      const b = await readJson();
+      if (b && b.msg) {
+        const msg = String(b.msg);
+        const sig = msg.slice(0, 120);
+        const prev = await getSetting(env, 'alert_last', '');
+        const prevTs = parseInt(await getSetting(env, 'alert_last_ts', '0'), 10) || 0;
+        if (!(prev === sig && (nowSec() - prevTs) < 1800)) {
+          await setSetting(env, 'alert_last', sig);
+          await setSetting(env, 'alert_last_ts', String(nowSec()));
+          await notifyOwners(env, msg);
+        }
+      }
+      return Response.json({ ok: true });
+    }
+
     // مصدر تلقرام (@AbodSyripa): كل ما يحتاجه القارئ في نداء واحد + تحديث آخر رسالة معالَجة
     if (url.pathname === '/tgsource') {
       if (request.headers.get('x-secret') !== env.ENQUEUE_SECRET) return new Response('forbidden', { status: 403 });
@@ -1215,6 +1332,15 @@ export default {
         const b = await readJson();
         if (b && b.last_id != null) await setSetting(env, 'tg_last_id', String(b.last_id));
         if (b && b.back_id != null) await setSetting(env, 'tg_back_id', String(b.back_id));
+        // انتهاء السحب التدريجي — يبلّغه القارئ عند بلوغ حدّ النافذة؛ نوقفه وننبّه مرة واحدة
+        if (b && b.backfill_done) {
+          await setSetting(env, 'tg_backfill', '0');
+          if ((await getSetting(env, 'backfill_done', '0')) !== '1') {
+            await setSetting(env, 'backfill_done', '1');
+            const days = parseInt(await getSetting(env, 'tg_back_days', '90'), 10) || 90;
+            await notifyOwners(env, `✅ <b>خلّصنا السحب التدريجي</b>\n\nنشرنا كل القديم (آخر ${Math.round(days / 30)} شهور تقريباً) من المصدر.\nمن الحين بننشر الجديد أول بأول تلقائياً.`);
+          }
+        }
         return Response.json({ ok: true });
       }
       // GET: الأهداف = كل القنوات المفعّلة مجمّعة بالدايلب (بلا تصفية قسم — مصدر واحد مختلط)
@@ -1237,8 +1363,27 @@ export default {
         limit: parseInt(await getSetting(env, 'tg_source_limit', '4'), 10) || 4,   // كم تطبيق كحد أقصى لكل تشغيل
         footer: await getSetting(env, 'footer', ''),
         reactions: await getSetting(env, 'reactions', '🔥,❤️'),
+        gemini_key: env.GEMINI_API_KEY || '',   // مفتاح التعريب (سرّ الووركر) — يصل للقارئ المصرّح فقط
+        backfill: (await getSetting(env, 'tg_backfill', '0')) === '1',   // السحب التدريجي مفعّل؟
+        back_days: parseInt(await getSetting(env, 'tg_back_days', '90'), 10) || 90,
+        stats_due: (nowSec() - (parseInt(await getSetting(env, 'stats_last_ts', '0'), 10) || 0)) >= 3300,  // تحليلات كل ساعة
         groups,
       });
+    }
+
+    // 📊 تحليلات القناة اليومية (مشاهدات/تفاعلات/منشورات) — يرفعها القارئ
+    if (url.pathname === '/stats' && request.method === 'POST') {
+      if (request.headers.get('x-secret') !== env.ENQUEUE_SECRET) return new Response('forbidden', { status: 403 });
+      const b = await readJson();
+      const day = (b && b.day) || ksaDay();
+      let hist = [];
+      try { hist = JSON.parse(await getSetting(env, 'views_history', '[]')) || []; } catch { hist = []; }
+      hist = hist.filter(e => e && e.d !== day);
+      hist.push({ d: day, v: Number(b.views) || 0, r: Number(b.reactions) || 0, p: Number(b.posts) || 0 });
+      hist = hist.slice(-30);
+      await setSetting(env, 'views_history', JSON.stringify(hist));
+      await setSetting(env, 'stats_last_ts', String(nowSec()));
+      return Response.json({ ok: true });
     }
 
     // إدخال تطبيقات من الماسح
