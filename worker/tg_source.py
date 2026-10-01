@@ -183,7 +183,7 @@ def clean_desc(cap, name=""):
 # ---- التعريب الذكي (جيمناي) — بأمانة تامة: يعرّب المذكور فقط، ما يخترع ولا يزيد ولا يعدّل ----
 GEMINI_MODELS = ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash",
                  "gemini-3.5-flash", "gemini-flash-latest"]
-GROQ_MODEL = "llama-3.3-70b-versatile"   # بديل مجاني بحدّ يومي عالٍ عند نفاد جيمناي
+GROQ_MODEL = "openai/gpt-oss-120b"   # بديل جروك مجاني بحدّ يومي عالٍ عند نفاد جيمناي
 
 # الخاتمة = فوتر كل قناة الحالي (من إعدادات البوت)
 
