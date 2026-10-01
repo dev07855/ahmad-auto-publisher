@@ -224,7 +224,9 @@ def _gemini_localize(name, cap):
                     "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent" % m,
                     headers={"x-goog-api-key": key, "Content-Type": "application/json"},
                     json=body, timeout=45)
-                if r.status_code in (429, 500, 503):      # ضغط/مؤقّت → أعد أو بدّل الموديل
+                if r.status_code == 429:                  # حد جيمناي اللحظي — نفس الحد لكل الموديلات، لا تستهلكه بمحاولات
+                    raise TransientError("حد جيمناي اللحظي (429) — سنعيد تلقائياً بالجولة القادمة")
+                if r.status_code in (500, 503):           # ضغط مؤقّت على موديل → جرّب الموديل التالي
                     last = "HTTP %s" % r.status_code; continue
                 d = r.json()
                 parts = d["candidates"][0]["content"]["parts"]
@@ -235,6 +237,8 @@ def _gemini_localize(name, cap):
                 if o.get("name") and o.get("desc"):
                     return o
                 last = "رد ناقص"
+            except TransientError:
+                raise                                     # 429 يوقف فوراً، لا يُبلع كخطأ عابر
             except Exception as e:
                 last = str(e)[:90]; print("[gemini] %s: %s" % (m, last)); continue
     raise TransientError("تعذّر التعريب عبر كل موديلات جيمناي — آخر سبب: " + last)
