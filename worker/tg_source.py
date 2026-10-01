@@ -193,8 +193,23 @@ class TransientError(Exception):
     pass
 
 
+def _sanitize_src(src):
+    """ينظّف نص المصدر من بصمة الناشر قبل التعريب: معرّفات @، روابط، وأسطر البرandة."""
+    out = []
+    for ln in (src or "").splitlines():
+        t = re.sub(r'@\w+', '', ln)
+        t = re.sub(r'https?://\S+|t\.me/\S+', '', t)
+        if re.search(r'(?i)blatant|bodsy|syripa|ipaomtk|check0?ver|t\.me|telegram|قناة|تابعنا|اشترك|'
+                     r'modded\s*by|modified\s*by|cracked|by\s+\w+|developer|مطوّر|المطور|بواسطة', t):
+            continue
+        t = t.strip()
+        if t:
+            out.append(t)
+    return "\n".join(out)
+
+
 def _build_prompt(name, cap):
-    src = (cap or name or "").strip()
+    src = _sanitize_src(cap or name or "")
     return (
         "أنت كاتب محتوى عربي فاخر لقناة تطبيقات آيفون.\n"
         "هذه معلومات تطبيق كما وردت من المصدر:\n---\n" + src + "\n---\n"
@@ -207,6 +222,8 @@ def _build_prompt(name, cap):
         "ممنوع تماماً اختراع أي ميزة غير مذكورة، وممنوع الزيادة من عندك، وممنوع تعديل أو تضخيم "
         "أي ميزة. إذا لم يذكر المصدر مميزات واضحة فاكتب من 2 إلى 3 نقاط واقعية موجزة تصف وظيفة "
         "التطبيق الأساسية فقط بلا مبالغة.\n"
+        "⛔ ممنوع منعاً باتاً ذكر أو ترجمة أي اسم ناشر/مصدر/مطوّر معدِّل، أو أي معرّف يبدأ بـ@، أو أي رابط، "
+        "أو عبارة مثل «تم التعديل/التطوير بواسطة فلان» — تجاهلها نهائياً ولا تُدرجها بأي حقل.\n"
         "ممنوع أي كلمة إنجليزية في المخرجات عدا حقل name. أعِد JSON فقط بالحقول: name, desc, features."
     )
 
