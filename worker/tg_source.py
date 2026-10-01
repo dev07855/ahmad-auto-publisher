@@ -183,22 +183,19 @@ def clean_desc(cap, name=""):
 # ---- التعريب الذكي (جيمناي) — بأمانة تامة: يعرّب المذكور فقط، ما يخترع ولا يزيد ولا يعدّل ----
 GEMINI_MODELS = ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash",
                  "gemini-3.5-flash", "gemini-flash-latest"]
+GROQ_MODEL = "llama-3.3-70b-versatile"   # بديل مجاني بحدّ يومي عالٍ عند نفاد جيمناي
 
-# الخاتمة = فوتر كل قناة الحالي (من إعدادات البوت) — يُمرَّر لـ_format_caption لكل قناة
+# الخاتمة = فوتر كل قناة الحالي (من إعدادات البوت)
 
 
 class TransientError(Exception):
-    """عطل مؤقّت (جيمناي/شبكة/مخ) — نوقف الدفعة بلا تقديم المؤشّر ونعيد لاحقاً، لا نخسر التطبيق."""
+    """عطل مؤقّت (تعريب/شبكة/مخ) — نوقف الدفعة بلا تقديم المؤشّر ونعيد لاحقاً، لا نخسر التطبيق."""
     pass
 
 
-def _gemini_localize(name, cap):
-    """يرجّع dict{name,desc,features[]} معرّب بأمانة. يرمي TransientError عند تعذّر التعريب."""
-    key = os.environ.get("GEMINI_API_KEY", "").strip()
-    if not key:
-        raise TransientError("مفتاح جيمناي مفقود (GEMINI_API_KEY) — التعريب متوقّف")
+def _build_prompt(name, cap):
     src = (cap or name or "").strip()
-    prompt = (
+    return (
         "أنت كاتب محتوى عربي فاخر لقناة تطبيقات آيفون.\n"
         "هذه معلومات تطبيق كما وردت من المصدر:\n---\n" + src + "\n---\n"
         "المطلوب بأمانة تامة وبدون أي اختراع أو مبالغة أو تعديل:\n"
@@ -212,42 +209,82 @@ def _gemini_localize(name, cap):
         "التطبيق الأساسية فقط بلا مبالغة.\n"
         "ممنوع أي كلمة إنجليزية في المخرجات عدا حقل name. أعِد JSON فقط بالحقول: name, desc, features."
     )
-    body = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"responseMimeType": "application/json", "temperature": 0.7},
-    }
-    last = ""
+
+
+def _valid(o):
+    return o if (isinstance(o, dict) and o.get("name") and o.get("desc")) else None
+
+
+def _try_gemini(prompt):
+    """يجرّب جيمناي؛ يرجّع dict أو None (None = نفد حدّه/فشل، ننتقل لجروك)."""
+    key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if not key:
+        return None
+    body = {"contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"responseMimeType": "application/json", "temperature": 0.7}}
     for m in GEMINI_MODELS:
-        for attempt in range(2):
-            try:
-                r = None
-                for _rl in range(3):                      # عند 429 ننتظر ويتجدد الحد اللحظي ثم نعيد نفس الطلب (ننشر أكثر بدل إيقاف الدفعة كاملة)
-                    r = requests.post(
-                        "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent" % m,
-                        headers={"x-goog-api-key": key, "Content-Type": "application/json"},
-                        json=body, timeout=45)
-                    if r.status_code != 429:
-                        break
-                    if _rl < 2:
-                        print("[gemini] 429 — ننتظر 30ث ونعيد"); time.sleep(30)
-                if r.status_code == 429:                  # استمر بعد الانتظار (غالباً حد يومي) → أوقف وأعد لاحقاً
-                    raise TransientError("حد جيمناي (429) استمر بعد الانتظار — سنعيد تلقائياً بالجولة القادمة")
-                if r.status_code in (500, 503):           # ضغط مؤقّت على موديل → جرّب الموديل التالي
-                    last = "HTTP %s" % r.status_code; continue
-                d = r.json()
-                parts = d["candidates"][0]["content"]["parts"]
-                txt = next((p["text"] for p in parts
-                            if str(p.get("text", "")).strip().startswith("{")),
-                           parts[-1].get("text", ""))
-                o = json.loads(txt)
-                if o.get("name") and o.get("desc"):
-                    return o
-                last = "رد ناقص"
-            except TransientError:
-                raise                                     # 429 يوقف فوراً، لا يُبلع كخطأ عابر
-            except Exception as e:
-                last = str(e)[:90]; print("[gemini] %s: %s" % (m, last)); continue
-    raise TransientError("تعذّر التعريب عبر كل موديلات جيمناي — آخر سبب: " + last)
+        try:
+            r = None
+            for _rl in range(3):                      # عند 429 ننتظر ويتجدد الحد اللحظي ثم نعيد
+                r = requests.post(
+                    "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent" % m,
+                    headers={"x-goog-api-key": key, "Content-Type": "application/json"},
+                    json=body, timeout=45)
+                if r.status_code != 429:
+                    break
+                if _rl < 2:
+                    print("[gemini] 429 — ننتظر 30ث ونعيد"); time.sleep(30)
+            if r.status_code == 429:                  # نفد حدّ جيمناي، ننتقل لجروك
+                print("[gemini] 429 مستمر → بديل جروك"); return None
+            if r.status_code in (500, 503):
+                continue
+            parts = r.json()["candidates"][0]["content"]["parts"]
+            txt = next((p["text"] for p in parts if str(p.get("text", "")).strip().startswith("{")),
+                       parts[-1].get("text", ""))
+            o = _valid(json.loads(txt))
+            if o:
+                return o
+        except Exception as e:
+            print("[gemini] %s: %s" % (m, str(e)[:90])); continue
+    return None
+
+
+def _try_groq(prompt):
+    """بديل مجاني: جروك (llama-3.3-70b). يرجّع dict أو None."""
+    key = os.environ.get("GROQ_API_KEY", "").strip()
+    if not key:
+        return None
+    body = {"model": GROQ_MODEL, "temperature": 0.7,
+            "response_format": {"type": "json_object"},
+            "messages": [{"role": "user", "content": prompt}]}
+    for attempt in range(2):
+        try:
+            r = requests.post("https://api.groq.com/openai/v1/chat/completions",
+                              headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"},
+                              json=body, timeout=45)
+            if r.status_code == 429:
+                time.sleep(20); continue
+            if r.status_code >= 500:
+                continue
+            txt = r.json()["choices"][0]["message"]["content"]
+            o = _valid(json.loads(txt))
+            if o:
+                return o
+        except Exception as e:
+            print("[groq] %s" % str(e)[:90]); continue
+    return None
+
+
+def _gemini_localize(name, cap):
+    """يعرّب بأمانة: جيمناي أولاً، وإذا نفد حدّه → جروك. يرمي TransientError لو فشل الاثنان."""
+    prompt = _build_prompt(name, cap)
+    o = _try_gemini(prompt)
+    if o:
+        return o
+    o = _try_groq(prompt)
+    if o:
+        print("[localize] عُرّب عبر جروك (جيمناي غير متاح)"); return o
+    raise TransientError("تعذّر التعريب عبر جيمناي وجروك — سنعيد تلقائياً بالجولة القادمة")
 
 
 CAPTION_LIMIT = 1000   # حدّ تلقرام للتعليق 1024 حرف مرئي — نبقى دونه بأمان
@@ -427,6 +464,9 @@ async def _run():
     gk = (st.get("gemini_key") or "").strip()
     if gk and not os.environ.get("GEMINI_API_KEY"):
         os.environ["GEMINI_API_KEY"] = gk
+    qk = (st.get("groq_key") or "").strip()
+    if qk and not os.environ.get("GROQ_API_KEY"):
+        os.environ["GROQ_API_KEY"] = qk
     enabled = bool(st.get("enabled", True))
     limit = int(st.get("limit", 4) or 4)
     groups = st.get("groups", [])

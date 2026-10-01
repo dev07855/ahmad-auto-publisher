@@ -1385,6 +1385,7 @@ export default {
         footer: await getSetting(env, 'footer', ''),
         reactions: await getSetting(env, 'reactions', '🔥,❤️'),
         gemini_key: env.GEMINI_API_KEY || '',   // مفتاح التعريب (سرّ الووركر) — يصل للقارئ المصرّح فقط
+        groq_key: env.GROQ_API_KEY || '',        // بديل التعريب المجاني عند نفاد جيمناي
         backfill: (await getSetting(env, 'tg_backfill', '0')) === '1',   // السحب التدريجي مفعّل؟
         back_days: parseInt(await getSetting(env, 'tg_back_days', '90'), 10) || 90,
         stats_due: (nowSec() - (parseInt(await getSetting(env, 'stats_last_ts', '0'), 10) || 0)) >= 3300,  // تحليلات كل ساعة
