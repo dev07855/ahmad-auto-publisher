@@ -1052,7 +1052,14 @@ async function maybeDailySummary(env) {
   let subsLines = [];
   for (const c of ((await env.DB.prepare('SELECT chat_id,name,username FROM channels WHERE enabled=1').all()).results || [])) {
     const cnt = await getSubscriberCount(env, c.username || c.chat_id);
-    if (cnt != null) subsLines.push(`👥 ${c.name}: ${cnt}`);
+    if (cnt == null) continue;
+    let sh = [];
+    try { sh = JSON.parse(await getSetting(env, 'subs_hist_' + c.chat_id, '[]')) || []; } catch { sh = []; }
+    const past = sh.filter(e => e.d !== ksaDay());
+    const prev = past.length ? past[past.length - 1].c : cnt;
+    const g = cnt - prev;
+    const arrow = g > 0 ? ` (+${g} \u25b2 اليوم)` : g < 0 ? ` (${g} \u25bc اليوم)` : '';
+    subsLines.push(`👥 ${c.name}: ${cnt}${arrow}`);
   }
   const subsLine = subsLines.length ? '\n\n' + subsLines.join('\n') : '';
   // 👁️ مشاهدات/تفاعلات اليوم + تقدّم الأهداف
@@ -1188,7 +1195,14 @@ async function maybeWeeklySummary(env) {
   let subsLines = [];
   for (const c of ((await env.DB.prepare('SELECT chat_id,name,username FROM channels WHERE enabled=1').all()).results || [])) {
     const cnt = await getSubscriberCount(env, c.username || c.chat_id);
-    if (cnt != null) subsLines.push(`👥 ${c.name}: ${cnt}`);
+    if (cnt == null) continue;
+    let sh = [];
+    try { sh = JSON.parse(await getSetting(env, 'subs_hist_' + c.chat_id, '[]')) || []; } catch { sh = []; }
+    const past = sh.filter(e => e.d !== ksaDay());
+    const prev = past.length ? past[past.length - 1].c : cnt;
+    const g = cnt - prev;
+    const arrow = g > 0 ? ` (+${g} \u25b2 اليوم)` : g < 0 ? ` (${g} \u25bc اليوم)` : '';
+    subsLines.push(`👥 ${c.name}: ${cnt}${arrow}`);
   }
   const subsLine = subsLines.length ? '\n\n' + subsLines.join('\n') : '';
   await notifyOwners(env, `<b>🗓️ تقرير الأسبوع</b>\n\nنُشر إجمالاً: ${total}\nأنشط قسم: ${topName}${subsLine}\n\n${lines.join('\n')}\n\n⚠️ أخطاء الأسبوع: ${errs}`);
