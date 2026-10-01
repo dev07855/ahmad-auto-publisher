@@ -220,12 +220,18 @@ def _gemini_localize(name, cap):
     for m in GEMINI_MODELS:
         for attempt in range(2):
             try:
-                r = requests.post(
-                    "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent" % m,
-                    headers={"x-goog-api-key": key, "Content-Type": "application/json"},
-                    json=body, timeout=45)
-                if r.status_code == 429:                  # حد جيمناي اللحظي — نفس الحد لكل الموديلات، لا تستهلكه بمحاولات
-                    raise TransientError("حد جيمناي اللحظي (429) — سنعيد تلقائياً بالجولة القادمة")
+                r = None
+                for _rl in range(3):                      # عند 429 ننتظر ويتجدد الحد اللحظي ثم نعيد نفس الطلب (ننشر أكثر بدل إيقاف الدفعة كاملة)
+                    r = requests.post(
+                        "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent" % m,
+                        headers={"x-goog-api-key": key, "Content-Type": "application/json"},
+                        json=body, timeout=45)
+                    if r.status_code != 429:
+                        break
+                    if _rl < 2:
+                        print("[gemini] 429 — ننتظر 30ث ونعيد"); time.sleep(30)
+                if r.status_code == 429:                  # استمر بعد الانتظار (غالباً حد يومي) → أوقف وأعد لاحقاً
+                    raise TransientError("حد جيمناي (429) استمر بعد الانتظار — سنعيد تلقائياً بالجولة القادمة")
                 if r.status_code in (500, 503):           # ضغط مؤقّت على موديل → جرّب الموديل التالي
                     last = "HTTP %s" % r.status_code; continue
                 d = r.json()
