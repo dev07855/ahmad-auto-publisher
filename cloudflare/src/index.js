@@ -1216,6 +1216,27 @@ async function maybeBootstrap(env) {
   if (wh && wh.ok) await setSetting(env, 'bootstrapped', '1');
 }
 
+// يشغّل مهمّة القارئ (telegram.yml) عبر repository_dispatch كل ~10 دقائق —
+// لأن جدول جيت هب التلقائي مخنوق على بعض الحسابات؛ كرون كلاودفلير موثوق.
+async function maybeTriggerReader(env) {
+  if (!env.GH_TOKEN || !env.GH_REPO) return;
+  const last = parseInt(await getSetting(env, 'reader_last_trigger', '0'), 10) || 0;
+  if (nowSec() - last < 540) return;   // كل ~9 دقائق (الكرون كل 3 دقائق)
+  await setSetting(env, 'reader_last_trigger', String(nowSec()));
+  try {
+    await fetch(`https://api.github.com/repos/${env.GH_REPO}/dispatches`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${env.GH_TOKEN}`,
+        'Accept': 'application/vnd.github+json',
+        'User-Agent': 'taz-auto-publisher',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ event_type: 'run_reader' }),
+    });
+  } catch (e) { console.log('[reader-trigger]', (e && e.stack) || e); }
+}
+
 // ---------- المُوجّه ----------
 export default {
   async fetch(request, env, ctx) {
@@ -1439,6 +1460,7 @@ export default {
   async scheduled(event, env, ctx) {
     ctx.waitUntil((async () => {
       await maybeBootstrap(env);
+      await maybeTriggerReader(env);   // يشغّل القارئ بموثوقية (جدول جيت هب مخنوق)
       await tick(env);
       await maybeHealthCheck(env);
       await maybeSubsWatch(env);

@@ -1,7 +1,9 @@
 name: telegram-source
 on:
   schedule:
-    - cron: "*/10 * * * *"   # كل 10 دقائق: يقرأ الجديد من قناة المصدر وينشر
+    - cron: "*/10 * * * *"   # احتياطي (جدول جيت هب مخنوق على بعض الحسابات)
+  repository_dispatch:
+    types: [run_reader]       # المصدر الموثوق: المخ (كلاودفلير) يطلقه كل ~10 دقائق
   workflow_dispatch: {}
 permissions:
   contents: read
